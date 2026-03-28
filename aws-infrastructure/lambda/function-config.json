@@ -1,0 +1,13 @@
+{
+  "function_name": "cost-monitoring-query",
+  "runtime": "python3.9",
+  "handler": "finops_cost_tracking.lambda_handler",
+  "role": "arn:aws:iam::107650139384:role/mogam-ora-cost-monitoring-lambda",
+  "timeout": 300,
+  "memory_size": 256,
+  "architecture": "x86_64",
+  "ephemeral_storage": 512,
+  "environment_variables": null,
+  "event_source_mappings": [],
+  "description": "Cost monitoring query Lambda - S3 메트릭 수집 및 프로젝트별 비용 집계"
+}

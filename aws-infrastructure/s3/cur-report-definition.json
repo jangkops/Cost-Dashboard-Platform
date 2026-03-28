@@ -1,0 +1,14 @@
+{
+  "report_name": "mogam-hourly-cur",
+  "time_unit": "HOURLY",
+  "format": "Parquet",
+  "compression": "Parquet",
+  "additional_schema_elements": ["RESOURCES"],
+  "s3_bucket": "mogam-or-cur-stg",
+  "s3_prefix": "cur",
+  "s3_region": "us-west-2",
+  "additional_artifacts": ["ATHENA"],
+  "refresh_closed_reports": true,
+  "report_versioning": "OVERWRITE_REPORT",
+  "billing_view_arn": "arn:aws:billing::107650139384:billingview/primary"
+}

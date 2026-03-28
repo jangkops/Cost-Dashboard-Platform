@@ -1,0 +1,80 @@
+{
+  "bucket_name": "mogam-or-cur-stg",
+  "region": "us-west-2",
+  "encryption": {
+    "sse_algorithm": "AES256",
+    "bucket_key_enabled": false
+  },
+  "versioning": "Disabled",
+  "prefixes": {
+    "metrics/": "GPU/CPU 모니터링 에이전트 메트릭 (JSONL, enhanced_v2 파티션)",
+    "metrics/enhanced_v2/${year}/${month}/${day}/${hour}/": "파티션 프로젝션 경로",
+    "cur/mogam-hourly-cur/": "AWS CUR Parquet 데이터",
+    "athena-results/": "Athena 쿼리 결과 출력",
+    "athena-cur/": "CUR Athena 통합 메타데이터",
+    "inventory/mogam-or/project-weekly-inventory/data/": "S3 인벤토리 Parquet",
+    "inventory-snapshots/": "인벤토리 스냅샷",
+    "bedrock-logs/AWSLogs/107650139384/BedrockModelInvocationLogs/": "Bedrock 모델 호출 로그",
+    "agent-backup/": "에이전트 백업",
+    "exporters/": "데이터 내보내기",
+    "onboarding-attachments/": "온보딩 첨부파일"
+  },
+  "lifecycle_rules": [
+    {
+      "id": "DeleteOldMetrics",
+      "prefix": "metrics/",
+      "status": "Enabled",
+      "expiration_days": 395,
+      "description": "메트릭 데이터 13개월 후 자동 삭제"
+    }
+  ],
+  "bucket_policy": {
+    "statements": [
+      {
+        "sid": "CURBucketAccess",
+        "effect": "Allow",
+        "principal": "billingreports.amazonaws.com",
+        "actions": ["s3:GetBucketAcl", "s3:GetBucketPolicy"],
+        "resource": "arn:aws:s3:::mogam-or-cur-stg",
+        "condition": {
+          "aws:SourceAccount": "107650139384",
+          "aws:SourceArn": "arn:aws:cur:us-east-1:107650139384:definition/*"
+        }
+      },
+      {
+        "sid": "CURPutObject",
+        "effect": "Allow",
+        "principal": "billingreports.amazonaws.com",
+        "actions": ["s3:PutObject"],
+        "resource": "arn:aws:s3:::mogam-or-cur-stg/*",
+        "condition": {
+          "aws:SourceAccount": "107650139384",
+          "aws:SourceArn": "arn:aws:cur:us-east-1:107650139384:definition/*"
+        }
+      },
+      {
+        "sid": "S3InventoryPolicy",
+        "effect": "Allow",
+        "principal": "s3.amazonaws.com",
+        "actions": ["s3:PutObject"],
+        "resource": "arn:aws:s3:::mogam-or-cur-stg/inventory/*",
+        "condition": {
+          "aws:SourceAccount": "107650139384",
+          "s3:x-amz-acl": "bucket-owner-full-control",
+          "aws:SourceArn": ["arn:aws:s3:::mogam-or", "arn:aws:s3:::mogam-or-tmp", "arn:aws:s3:::mogam-or-user"]
+        }
+      },
+      {
+        "sid": "AmazonBedrockLogsWrite",
+        "effect": "Allow",
+        "principal": "bedrock.amazonaws.com",
+        "actions": ["s3:PutObject"],
+        "resource": "arn:aws:s3:::mogam-or-cur-stg/bedrock-logs/AWSLogs/107650139384/BedrockModelInvocationLogs/*",
+        "condition": {
+          "aws:SourceAccount": "107650139384",
+          "aws:SourceArn": "arn:aws:bedrock:us-west-2:107650139384:*"
+        }
+      }
+    ]
+  }
+}
