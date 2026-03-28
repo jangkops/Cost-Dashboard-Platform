@@ -9,7 +9,8 @@ export default function Sidebar() {
     server: true,
     sso: true,
     github: true,
-    logs: true
+    logs: true,
+    bedrock: true
   });
 
   const toggleMenu = (menu) => {
@@ -125,6 +126,26 @@ export default function Sidebar() {
               <Link to="/logs" className="p-2 rounded-lg hover:bg-sidebarHover">포털 작업 로그</Link>
               <Link to="/user-logs" className="p-2 rounded-lg hover:bg-sidebarHover">사용자 접속 로그</Link>
               <Link to="/github-audit" className="p-2 rounded-lg hover:bg-sidebarHover">GitHub 로그</Link>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <button
+          className="flex items-center justify-between w-full p-2 rounded-lg hover:bg-sidebarHover"
+          onClick={() => toggleMenu('bedrock')}
+        >
+          <span className="font-semibold">Bedrock 게이트웨이</span>
+          {openMenus.bedrock ? <ChevronDownIcon className="w-5 h-5" /> : <ChevronRightIcon className="w-5 h-5" />}
+        </button>
+        <AnimatePresence>
+          {openMenus.bedrock && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              className="overflow-hidden ml-5 flex flex-col gap-2"
+            >
+              <Link to="/bedrock-gateway" className="p-2 rounded-lg hover:bg-sidebarHover">사용량 모니터링</Link>
             </motion.div>
           )}
         </AnimatePresence>

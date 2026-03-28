@@ -13,6 +13,7 @@ import UserLogs from "./pages/UserLogs";
 import GitHubPermissions from "./pages/GitHubPermissions";
 import GitHubAuditLogs from "./pages/GitHubAuditLogs";
 import CostMonitoring from "./pages/CostMonitoring";
+import BedrockGateway from "./pages/BedrockGateway";
 
 function ProtectedRoute({ children }) {
   const token = localStorage.getItem("authToken");
@@ -71,6 +72,7 @@ export default function App() {
           <Route path="/github-audit" element={<GitHubAuditLogs />} />
           <Route path="/logs" element={<Monitoring />} />
           <Route path="/user-logs" element={<UserLogs />} />
+          <Route path="/bedrock-gateway" element={<BedrockGateway />} />
         </Route>
       </Routes>
     </BrowserRouter>
