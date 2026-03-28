@@ -1,0 +1,129 @@
+<template>
+  <div class="cost-monitoring-container p-6">
+    <h1 class="text-3xl font-bold mb-6">Cost Monitoring</h1>
+    
+    <!-- 요약 카드 -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+      <div class="bg-white p-4 rounded-lg shadow">
+        <h3 class="text-sm font-medium text-gray-500">Total Instances</h3>
+        <p class="text-2xl font-bold">{{ summary.total_instances }}</p>
+      </div>
+      <div class="bg-white p-4 rounded-lg shadow">
+        <h3 class="text-sm font-medium text-gray-500">Active Users</h3>
+        <p class="text-2xl font-bold">{{ summary.active_users }}</p>
+      </div>
+      <div class="bg-white p-4 rounded-lg shadow">
+        <h3 class="text-sm font-medium text-gray-500">Cost Trend</h3>
+        <p class="text-2xl font-bold capitalize">{{ summary.cost_trend }}</p>
+      </div>
+      <div class="bg-white p-4 rounded-lg shadow">
+        <h3 class="text-sm font-medium text-gray-500">Last Updated</h3>
+        <p class="text-sm">{{ formatDate(summary.last_updated) }}</p>
+      </div>
+    </div>
+
+    <!-- 아테나 쿼리 섹션 -->
+    <div class="bg-white p-6 rounded-lg shadow mb-6">
+      <h2 class="text-xl font-bold mb-4">Athena Query</h2>
+      <textarea 
+        v-model="query" 
+        class="w-full h-32 p-3 border rounded-lg font-mono text-sm"
+        placeholder="SELECT * FROM cost_monitoring.activity_metrics LIMIT 10;"
+      ></textarea>
+      <button 
+        @click="executeQuery"
+        :disabled="loading"
+        class="mt-3 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
+      >
+        {{ loading ? 'Executing...' : 'Execute Query' }}
+      </button>
+    </div>
+
+    <!-- 쿼리 결과 -->
+    <div v-if="queryResults" class="bg-white p-6 rounded-lg shadow">
+      <h2 class="text-xl font-bold mb-4">Query Results</h2>
+      <div class="overflow-x-auto">
+        <pre class="text-sm bg-gray-100 p-4 rounded">{{ JSON.stringify(queryResults, null, 2) }}</pre>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script>
+export default {
+  name: 'CostMonitoring',
+  data() {
+    return {
+      summary: {
+        total_instances: 0,
+        active_users: 0,
+        cost_trend: 'loading',
+        last_updated: null
+      },
+      query: 'SELECT * FROM cost_monitoring.activity_metrics LIMIT 10;',
+      queryResults: null,
+      loading: false
+    }
+  },
+  async mounted() {
+    await this.loadSummary()
+  },
+  methods: {
+    async loadSummary() {
+      try {
+        const response = await fetch('/api/cost-monitoring/metrics/summary')
+        this.summary = await response.json()
+      } catch (error) {
+        console.error('Failed to load summary:', error)
+      }
+    },
+    async executeQuery() {
+      this.loading = true
+      try {
+        const response = await fetch('/api/cost-monitoring/athena/query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: this.query })
+        })
+        const result = await response.json()
+        
+        if (result.query_id) {
+          await this.pollQueryResults(result.query_id)
+        }
+      } catch (error) {
+        console.error('Query execution failed:', error)
+      } finally {
+        this.loading = false
+      }
+    },
+    async pollQueryResults(queryId) {
+      const maxAttempts = 30
+      let attempts = 0
+      
+      const poll = async () => {
+        try {
+          const response = await fetch(`/api/cost-monitoring/athena/results/${queryId}`)
+          const result = await response.json()
+          
+          if (result.status === 'SUCCEEDED') {
+            this.queryResults = result.results
+          } else if (result.status === 'FAILED' || attempts >= maxAttempts) {
+            console.error('Query failed or timed out')
+          } else {
+            attempts++
+            setTimeout(poll, 2000)
+          }
+        } catch (error) {
+          console.error('Failed to get query results:', error)
+        }
+      }
+      
+      poll()
+    },
+    formatDate(dateString) {
+      if (!dateString) return 'N/A'
+      return new Date(dateString).toLocaleString()
+    }
+  }
+}
+</script>

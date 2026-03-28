@@ -1,0 +1,98 @@
+import json
+import time
+import boto3
+import psutil
+from datetime import datetime
+
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    HAS_GPU = True
+except:
+    HAS_GPU = False
+
+def get_instance_id():
+    try:
+        import urllib.request
+        req = urllib.request.Request('http://169.254.169.254/latest/api/token', headers={'X-aws-ec2-metadata-token-ttl-seconds': '21600'}, method='PUT')
+        token = urllib.request.urlopen(req, timeout=1).read().decode()
+        req = urllib.request.Request('http://169.254.169.254/latest/meta-data/instance-id', headers={'X-aws-ec2-metadata-token': token})
+        return urllib.request.urlopen(req, timeout=1).read().decode()
+    except:
+        import socket
+        return socket.gethostname()
+
+def get_metrics():
+    metrics = []
+    instance_id = get_instance_id()
+    timestamp = datetime.utcnow()
+    
+    if HAS_GPU:
+        device_count = pynvml.nvmlDeviceGetCount()
+        for i in range(device_count):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+            
+            for proc in procs:
+                try:
+                    p = psutil.Process(proc.pid)
+                    username = p.username()
+                    cpu_percent = p.cpu_percent(interval=0.1)
+                    
+                    metrics.append({
+                        'instance_id': instance_id,
+                        'timestamp': timestamp.isoformat(),
+                        'username': username,
+                        'gpu_utilization': util.gpu,
+                        'cpu_utilization': cpu_percent,
+                        'project_code': 'default'
+                    })
+                except:
+                    pass
+    else:
+        for proc in psutil.process_iter(['pid', 'username', 'cpu_percent']):
+            try:
+                if proc.info['cpu_percent'] and proc.info['cpu_percent'] > 1.0:
+                    metrics.append({
+                        'instance_id': instance_id,
+                        'timestamp': timestamp.isoformat(),
+                        'username': proc.info['username'],
+                        'gpu_utilization': 0,
+                        'cpu_utilization': proc.info['cpu_percent'],
+                        'project_code': 'default'
+                    })
+            except:
+                pass
+    
+    return metrics, timestamp
+
+def send_to_s3(metrics, timestamp):
+    if not metrics:
+        return
+    
+    s3 = boto3.client('s3', region_name='us-west-2')
+    year = timestamp.strftime('%Y')
+    month = timestamp.strftime('%m')
+    day = timestamp.strftime('%d')
+    hour = timestamp.strftime('%H')
+    minute = timestamp.strftime('%M')
+    
+    key = f"metrics/year={year}/month={month}/day={day}/{hour}{minute}.json"
+    data = '\n'.join([json.dumps(m) for m in metrics])
+    
+    try:
+        s3.put_object(
+            Bucket='mogam-or-cur-data',
+            Key=key,
+            Body=data.encode('utf-8')
+        )
+        print(f"Sent {len(metrics)} metrics to S3")
+    except Exception as e:
+        print(f"Error sending to S3: {e}")
+
+if __name__ == '__main__':
+    while True:
+        metrics, timestamp = get_metrics()
+        send_to_s3(metrics, timestamp)
+        time.sleep(300)

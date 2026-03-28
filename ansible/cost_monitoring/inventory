@@ -1,0 +1,11 @@
+[gpu_servers]
+10.0.1.26 ansible_user=ubuntu  # mogam-or-p4d
+10.0.1.196 ansible_user=ubuntu # mogam-or-p4de
+10.0.1.101 ansible_user=ubuntu # mogam-or-g5
+
+[cpu_servers]
+10.0.1.50 ansible_user=ubuntu  # mogam-or-zonea-r7
+
+[all:vars]
+ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+ansible_python_interpreter=/usr/bin/python3

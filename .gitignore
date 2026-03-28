@@ -1,0 +1,32 @@
+# Environment
+.env
+*.env
+
+# Logs
+*.log
+task_logs.json
+user_access_logs.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Node
+node_modules/
+dist/
+build/
+
+# Docker
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

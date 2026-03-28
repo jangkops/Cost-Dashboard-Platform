@@ -1,0 +1,30 @@
+{
+  "users": {
+    "aychoi": "P240001",
+    "bskim": "P240002",
+    "cgjang": "MI25004",
+    "ckkang": "P240003",
+    "enhuh": "P240004",
+    "hblee": "P240005",
+    "hermee": "P240006",
+    "hklee": "P240007",
+    "hslee": "P240008",
+    "intern": "P240009",
+    "jhhong": "P240010",
+    "jwlee": "P240011",
+    "jykim": "P240012",
+    "jykim2": "P240013",
+    "mogam": "Shared_Idle_Cost",
+    "sbkim": "P240014",
+    "shlee": "P240015",
+    "shlee2": "P240016",
+    "srpark": "P240017",
+    "ssm-user": "Shared_Idle_Cost",
+    "ubuntu": "Shared_Idle_Cost",
+    "ybkim": "P240018",
+    "yjgo": "P240019",
+    "ymbaek": "P240020"
+  },
+  "default_project": "Unassigned_User",
+  "idle_project": "Shared_Idle_Cost"
+}

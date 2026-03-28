@@ -1,0 +1,9 @@
+boto3
+flask
+flask-cors
+ansible
+ansible-core
+PyJWT
+pytz
+requests
+python-dotenv

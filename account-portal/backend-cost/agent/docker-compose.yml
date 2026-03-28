@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  cost-agent:
+    build: .
+    image: cost-monitoring-agent:latest
+    container_name: cost_monitoring_agent
+    restart: always
+    pid: "host"
+    network_mode: "host"
+    privileged: true
+
+    environment:
+      - MAPPING_FILE_PATH=/app/config/mapping.json
+      - LOG_FILE_PATH=/var/log/cost-agent/usage_metrics.json
+      - TZ=Asia/Seoul
+      - LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
+
+    volumes:
+      # Config & Logs
+      - ../config/mapping.json:/app/config/mapping.json:ro
+      - /var/log/cost-agent:/var/log/cost-agent
+
+      # User Identity (호스트 유저명 매핑용)
+      - /etc/passwd:/etc/passwd:ro
+      - /etc/group:/etc/group:ro
+
+      # GPU Libraries ( 호스트 드라이버 주입)
+      - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
+      # - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.535.183.01:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.535.183.01:ro

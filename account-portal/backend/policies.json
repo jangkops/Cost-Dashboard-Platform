@@ -1,0 +1,38 @@
+{
+  "role_mappings": {
+    "AI팀": {
+      "server_groups": ["gpu-servers"],
+      "sudo": false,
+      "shell": "/bin/bash"
+    },
+    "DevOps팀": {
+      "server_groups": ["all-servers"],
+      "sudo": true,
+      "shell": "/bin/bash"
+    },
+    "Backend팀": {
+      "server_groups": ["web-servers"],
+      "sudo": false,
+      "shell": "/bin/bash"
+    },
+    "Frontend팀": {
+      "server_groups": ["web-servers"],
+      "sudo": false,
+      "shell": "/bin/bash"
+    }
+  },
+  "server_groups": {
+    "gpu-servers": {
+      "region": "us-east-1",
+      "instances": ["tag:Role=GPU"]
+    },
+    "web-servers": {
+      "region": "us-east-1",
+      "instances": ["tag:Role=Web"]
+    },
+    "all-servers": {
+      "region": "us-east-1",
+      "instances": ["*"]
+    }
+  }
+}

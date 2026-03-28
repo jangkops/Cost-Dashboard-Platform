@@ -1,0 +1,175 @@
+import { useState, useEffect } from "react";
+import { motion } from "framer-motion";
+import { 
+  CpuChipIcon, 
+  CircleStackIcon, 
+  UserGroupIcon, 
+  FolderIcon,
+  ArrowPathIcon,
+  ClockIcon,
+  PlayIcon 
+} from "@heroicons/react/24/outline";
+
+export default function CostMonitoring() {
+  const [summary, setSummary] = useState({
+    total_instances: 0,
+    active_users: 0,
+    cost_trend: 'loading',
+    last_updated: null
+  });
+  const [query, setQuery] = useState('SELECT * FROM cost_monitoring.activity_metrics LIMIT 10;');
+  const [queryResults, setQueryResults] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    loadSummary();
+  }, []);
+
+  const loadSummary = async () => {
+    try {
+      const response = await fetch('/api/cost-monitoring/metrics/summary');
+      const data = await response.json();
+      setSummary(data);
+    } catch (error) {
+      console.error('Failed to load summary:', error);
+    }
+  };
+
+  const executeQuery = async () => {
+    setLoading(true);
+    try {
+      const response = await fetch('/api/cost-monitoring/athena/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query })
+      });
+      const result = await response.json();
+      
+      if (result.query_id) {
+        await pollQueryResults(result.query_id);
+      }
+    } catch (error) {
+      console.error('Query execution failed:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const pollQueryResults = async (queryId) => {
+    const maxAttempts = 30;
+    let attempts = 0;
+    
+    const poll = async () => {
+      try {
+        const response = await fetch();
+        const result = await response.json();
+        
+        if (result.status === 'SUCCEEDED') {
+          setQueryResults(result.results);
+        } else if (result.status === 'FAILED' || attempts >= maxAttempts) {
+          console.error('Query failed or timed out');
+        } else {
+          attempts++;
+          setTimeout(poll, 2000);
+        }
+      } catch (error) {
+        console.error('Failed to get query results:', error);
+      }
+    };
+    
+    poll();
+  };
+
+  const formatDate = (dateString) => {
+    if (!dateString) return 'N/A';
+    return new Date(dateString).toLocaleString();
+  };
+
+  return (
+    <div className=space-y-6>
+      <div className=flex justify-between items-center>
+        <h1 className=text-3xl font-bold text-gray-900>Cost Monitoring</h1>
+        <button
+          onClick={loadSummary}
+          className=flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700
+        >
+          <ArrowPathIcon className=w-4 h-4 mr-2 />
+          Refresh
+        </button>
+      </div>
+
+      {/* 요약 카드 */}
+      <div className=grid grid-cols-1 md:grid-cols-4 gap-6>
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className=bg-white p-6 rounded-xl shadow-sm border border-gray-200
+        >
+          <div className=flex items-center>
+            <CpuChipIcon className=w-8 h-8 text-blue-600 />
+            <div className=ml-4>
+              <p className=text-sm font-medium text-gray-500>Total Instances</p>
+              <p className=text-2xl font-bold text-gray-900>{summary.total_instances}</p>
+            </div>
+          </div>
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.1 }}
+          className=bg-white p-6 rounded-xl shadow-sm border border-gray-200
+        >
+          <div className=flex items-center>
+            <UserGroupIcon className=w-8 h-8 text-green-600 />
+            <div className=ml-4>
+              <p className=text-sm font-medium text-gray-500>Active Users</p>
+              <p className=text-2xl font-bold text-gray-900>{summary.active_users}</p>
+            </div>
+          </div>
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.2 }}
+          className=bg-white p-6 rounded-xl shadow-sm border border-gray-200
+        >
+          <div className=flex items-center>
+            <CircleStackIcon className=w-8 h-8 text-purple-600 />
+            <div className=ml-4>
+              <p className=text-sm font-medium text-gray-500>Cost Trend</p>
+              <p className=text-2xl font-bold text-gray-900 capitalize>{summary.cost_trend}</p>
+            </div>
+          </div>
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.3 }}
+          className=bg-white p-6 rounded-xl shadow-sm border border-gray-200
+        >
+          <div className=flex items-center>
+            <ClockIcon className=w-8 h-8 text-orange-600 />
+            <div className=ml-4>
+              <p className=text-sm font-medium text-gray-500>Last Updated</p>
+              <p className=text-sm text-gray-900>{formatDate(summary.last_updated)}</p>
+            </div>
+          </div>
+        </motion.div>
+      </div>
+
+      {/* 아테나 쿼리 섹션 */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.4 }}
+        className=bg-white p-6 rounded-xl shadow-sm border border-gray-200
+      >
+        <h2 className=text-xl font-bold text-gray-900 mb-4>Athena Query</h2>
+        <textarea 
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          className=w-full h-32 p-3 border border-gray-300 rounded-lg font-mono text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent
+          placeholder=SELECT __pycache__ -p adaptive_pattern_analyzer.py add_all_missing_partitions.sql add_missing_partition_00.sql admin_selection_tool.py advanced_color_expansion_analyzer.py advanced_excel_analyzer.py agent_fixed.py agent_v14.py agent_v15.py agent_v16_1.py agent_v16_2.py agent_v16.2.1_hotfix.py agent_v16.2.2_enhanced.py agent_v16.2.3_finops_devops.py agent_v16.4.1.py agent_v16.py agent.py amazon_q_developer_mcp_docker_setup_guide.md amazon_q_developer_mcp_setup_guide.md analyze_json_structure.py ansible-project ansible-project-ath-v0.1 ansible-project-ath-v0.2 ansible-project-ath-v0.3 ansible-project-ath-v0.4 ansible-project-ath-v0.5 ansible-project-ath-v0.6 ansible-project-ath-v0.7 ansible-project-ath-v0.8 ansible-project-ath-v0.9 ansible-project-ath-v1.0 ansible-project-git-v0.1 ansible-project-orgpayer ansible-project-orgpayer-0.6 ansible-project-orgpayer-v0.2 ansible-project-orgpayer-v0.3 ansible-project-orgpayer-v0.4 ansible-project-orgpayer-v0.5 ansible-project-sso-v0.1 ansible-project-v0.1 ansible-project-v0.2 ansible-project-v0.3 ansible-project-v0.4 ansible-project-v0.5 ansible-project-v0.6 ansible-project-v0.7 ansible-project-v0.8 ansible-project-v0.9 ansible-project-v1.0 ansible-project-v1.1 app Applications athena_automation_lambda.py athena_cur_verification_query.sql athena_verification_results.json blobs check_hourly_coverage.sql check_november_eunna.py check_original.sql cluster_analyzer.py cluster-config-original.yaml cluster-config-updated.yaml connect_to_dashboard.py correct_json_parsing.sql correct_table_ddl.sql corrected_costs_10x_verified.json corrected_user_local_ips.py corrected_user_logs.py cost_agent_s3_enhancement cost_agent_verification cost_dashboard cost_dashboard_aws cost_monitoring_analysis cost_monitoring_data.json cost_monitoring_final.html cost_monitoring_updated.html create_auto_partition_table.sql create_auto_table_only.sql create_final_table.sql create_jsonlines_table.sql create_optimized_table.sql ct_events.json ctas_cost_optimize.sql current_dashboard_data.json daily_cumulative_validation.sql daily_different_values_dashboard.html dashboard_data_20251224.json dashboard_data_20251225.json dashboard_data_20251226.json dashboard_data_20251227.json dashboard_data_20251228.json dashboard_data_20251229.json dashboard_data_20251230.json dashboard_data_20251231.json dashboard_data.json dashboard_final_data.json data_integrity_check.sql date_validation.py december_final_result.json deploy_all.sh deploy_cur_automation.sh deploy_enhanced_v16.2.2.sh deploy_enhanced_v2_1_cluster.sh deploy_enhanced.sh deploy_finops_dashboard.sh deploy_finops_tier0.sh deploy_perfect_system.sh deploy_realtime_dashboard.sh deploy_ssm.sh deploy_v13.sh deploy_v15.sh deploy_v16.4.1.sh deploy.sh Desktop devops_finops_collaboration_dashboard.html docker-compose_v15.yml Dockerfile Dockerfile.enhanced Dockerfile.enhanced_v2_1 Dockerfile.v16.2.1 Dockerfile.v16.2.2 Dockerfile.v16.2.3 Dockerfile.v16.4.1 Documents Downloads enhanced_agent_athena_table.sql enhanced_agent_optimizer.py enhanced_agent_v2_1_cluster.py enhanced_agent_v2.py enhanced_agent_validation.sql enhanced_cur_validation_query.sql enhanced_daily_dashboard.json enhanced_dashboard_data.json enhanced_data_converter.py enhanced-cost-agent-v2.0.tar.gz enterprise_gpu_forensic.py eunna_accurate_analysis.json eunna_final_accurate_analyzer.py eunna_nov_expansion_analyzer.py eunna_optimized_analyzer.py eunna_precision_tuned_analyzer.py excel_complete_parser.py excel_forensic_analyzer.py excel_foundation_check.py excel_to_json_analyzer.py final_accurate_analyzer.py final_complete_solution.py final_corrected_display.py final_dashboard_applied.html final_dashboard_data.sql final_optimized_dashboard.py final_optimized_solution.sql final_precise_analyzer.py final_precise_extractor.py final_precision_costs_20x_verified.json final_ultra_analyzer.py final_user_logs.py final_working_pipeline.py final_working_table.sql finance_gpu_report.json finops_10x_verification_system.py finops_10x_verified_corrected_dashboard.html finops_20x_precision_system.py finops_20x_precision_zero_error_dashboard.html finops_6hour_daemon.py finops_dashboard_cur_automated.html finops_dashboard_data.json finops_dashboard_server.py finops_dashboard_verified_only.html finops_dashboard_verified_only.json finops_dashboard.html finops_devops_6hour_update.py finops_devops_sqlp_automation.py finops_devops_validation.sql finops_enhanced_dashboard.html finops_pre_dec24_cleanup.sh finops_safe_cleanup.sh finops_sqlp_devops_automation.py finops_sqlp_partition_check.sql finops_tier0_automation.py fix_date_accuracy.py fix_partition_check.sql fixed_athena_validation.sql fixed_json_parsing.sql fixed_pipeline.py fully_automated_pipeline.py generate_daily_data.py get_user_pc_ips.py gpu_2025_analysis.json gpu_2025_extractor.py gpu_area_analysis_result.json gpu_area_analysis.py gpu_color_analysis_result.json gpu_color_analysis.py gpu_color_region_analysis.py gpu_complete_analysis.py gpu_precise_analysis.py gpu_smart_analysis_result.json gpu_smart_analysis.py h100-jwlee-test hyunsu_pattern_simulator.py implementation_priority.md improved_cluster_analyzer.py improved_gpu_extractor.py improved_structure_analyzer.py index.json integrated_provisioning_component.js jaewon_accurate_eunna_pattern.py jaewon_improved_analyzer.py jsonlines_table.sql juyeon_complete_analysis.json kiro_mcp_setup_guide_corrected.md Library macos_mcp_setup_guide.md main.py manifest.json mapping.json MCP_SETUP_GUIDE.md menu_structure_optimized.md menu_structure.md mibr-mcp-manager mkdir mogam-kr-bastion-key.pub Movies Music network_ip_check.py new-user-create-v0.1 new-user-create-v0.2 new-user-create-v0.3 new-user-create-v0.4 nov_analysis.json november_user_analysis.py oci-layout optimize_data_transform.sql optimized_cluster_analyzer.py optimized_expansion_analyzer.py parallel-making-process parallel-making-process-v0.1 parallel-making-process-v0.2 parallel-making-process-v0.3 parallel-making-process-v0.4 parallelcluster-c5-update parallelcluster-c7-update-guide.txt pattern_based_analyzer.py pcluster-env perfect_accuracy_analyzer.py perfect_analysis_november.json perfect_validator_lambda.py perfect_zero_error_dashboard_data.json perfect_zero_error_realtime_dashboard.html perfect_zero_error_system.py Pictures pipeline_config_examples.py pipeline_config.json portal_integration Public quick_dashboard_update.py raw_data_check.sql README.md real_athena_validation.sql real_cost_calculator.py real_daily_costs.json real_daily_variation_dashboard.html real_dashboard_update.py real_data_20251231.json realistic_pattern_analyzer.py realistic_pipeline_result.json realistic_semi_auto_pipeline.py realtime_auto_dashboard.html realtime_dashboard_updater.py recheck_24hours.sql reliability_test_1.sql reliability_test_2.sql reliability_test_3.sql reliability_test_4.sql reliability_verification.sql reliable_optimization.sql repair_partitions.sql requirements.txt restore_ssh_keys.sh run_10_validations.py run_agent.sh run_pipeline_demo.py s3_lifecycle_policy.json sample_cur_data.csv semi_auto_gpu_analysis.json semi_auto_gpu_pipeline.py setup_automation_cron.sh setup_future_cron.sh setup_mcp_quick.sh simple_athena_check.sql simple_dashboard_update.py simple_enhanced_table.sql simple_finops_validation.sql simple_validation.sql simple_working_table.sql sso_provisioning.py sso_provisioning.yml sso_routes_fixed.py sso_routes_simplified.py sso_routes.py SSOTest.jsx sungho_accurate_gpu_drag_analyzer.py sungho_november_analysis.json test 임시 폴더 test_00_hour.sql test_auto_24hours.sql test_console_commands.js test_jsonlines_table.sql text_based_area_analyzer.py triple_verification_system.py triple_verified_dashboard.html ultra_cluster_analyzer.py update_agent.sh update_dashboard.sh update_existing_dashboard.py updated_devops_policy.json updated_user_access_logs.py upload_cost_monitoring.sh user_access_logs_fixed.py user_log_with_network.py user_logs_local_ip_primary.py user_project_map.json verify_all_days_real.sql verify_dec24.sql verify_optimization.sql verify_user_log_ips.py Virtual Machines.localized FROM cost_monitoring.activity_metrics LIMIT 10

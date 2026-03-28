@@ -1,0 +1,1168 @@
+from flask import Blueprint, jsonify
+from datetime import datetime, timedelta
+import boto3
+import time
+from collections import defaultdict
+import re
+
+cost_monitoring_bp = Blueprint('cost_monitoring', __name__)
+
+
+import json, os
+
+_MAPPINGS_FILE = os.path.join(os.path.dirname(__file__), '..', 'data', 'mappings.json')
+
+def _load_mappings():
+    with open(_MAPPINGS_FILE, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+def _save_mappings(data):
+    with open(_MAPPINGS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def _get_mappings():
+    m = _load_mappings()
+    return m
+
+_mappings_cache = None
+
+def _cached_mappings():
+    global _mappings_cache
+    if _mappings_cache is None:
+        _mappings_cache = _load_mappings()
+    return _mappings_cache
+
+def _invalidate_mappings_cache():
+    global _mappings_cache
+    _mappings_cache = None
+
+# 기존 코드 호환용 전역 변수 (프로퍼티처럼 동작)
+class _MappingProxy:
+    @property
+    def UID_TO_USERNAME(self):
+        m = _cached_mappings()
+        return {int(k): v for k, v in m['uid_to_username'].items()}
+    @property
+    def PROJECT_CODE_MAPPING(self):
+        return _cached_mappings()['project_code_mapping']
+    @property
+    def INSTANCE_NAMES(self):
+        return _cached_mappings()['instance_names']
+    @property
+    def PROJECT_NAME_TO_CODE(self):
+        return _cached_mappings()['project_name_to_code']
+
+_mp = _MappingProxy()
+
+INSTANCE_TYPES = {
+    'i-004e23df368dcb30e': 'P5.4xlarge',
+    'i-06a9b5df345d47eaa': 'P4D.24xlarge',
+    'i-0d53ba43b64510164': 'P4DE.24xlarge',
+    'i-0dc3c13df82448939': 'G5.12xlarge',
+    'i-0c30cae12f60d69d1': 'R7i.4xlarge',
+    'i-074a73c3cf9656989': 'G4DN.xlarge'
+}
+
+INSTANCE_ORDER = [
+    'i-004e23df368dcb30e',
+    'i-06a9b5df345d47eaa',
+    'i-0d53ba43b64510164',
+    'i-0dc3c13df82448939',
+    'i-0c30cae12f60d69d1',
+    'i-074a73c3cf9656989'
+]
+
+PCLUSTER_INSTANCE_TYPES = {
+    "m6i.xlarge", "c6i.4xlarge", "r6i.4xlarge", "r6i.8xlarge",
+    "c6i.xlarge", "r6i.12xlarge", "u-3tb1.56xlarge",
+    "g4dn.xlarge", "g5.2xlarge", "c7i.8xlarge",
+}
+
+PCLUSTER_PARTITION_MAP = {
+    "cpu-m6": "m6i.xlarge", "cpu-c6-4x": "c6i.4xlarge",
+    "cpu-r6-4x": "r6i.4xlarge", "cpu-r6-8x": "r6i.8xlarge",
+    "mrna-llm-label": "c6i.xlarge", "mrna-llm-optim": "r6i.12xlarge",
+    "cpu-u-3tb": "u-3tb1.56xlarge", "gpu-g4": "g4dn.xlarge",
+    "gpu-g5": "g5.2xlarge", "cpu-c7-8x": "c7i.8xlarge",
+}
+
+def get_sacct_compute_usage(date_str):
+    """sacct에서 컴퓨트 노드 사용자별 사용시간 조회"""
+    ssm = boto3.client('ssm', region_name='us-west-2')
+    dt = datetime.strptime(date_str, '%Y-%m-%d')
+    next_dt = dt + timedelta(days=1)
+    cmd = (f"/opt/slurm/bin/sacct --starttime {date_str}T00:00:00 "
+           f"--endtime {next_dt.strftime('%Y-%m-%d')}T00:00:00 "
+           f"--format=User%20,Account%30,Partition%15,ElapsedRaw --noheader -X "
+           f"--state=COMPLETED,FAILED,TIMEOUT,CANCELLED")
+    try:
+        resp = ssm.send_command(
+            InstanceIds=['i-074a73c3cf9656989'],
+            DocumentName='AWS-RunShellScript',
+            Parameters={'commands': [cmd]}
+        )
+        cmd_id = resp['Command']['CommandId']
+        import time as _time
+        for _ in range(15):
+            _time.sleep(1)
+            inv = ssm.get_command_invocation(CommandId=cmd_id, InstanceId='i-074a73c3cf9656989')
+            if inv['Status'] in ('Success', 'Failed', 'TimedOut', 'Cancelled'):
+                break
+        if inv['Status'] != 'Success':
+            return {}
+        usage = {}
+        for line in inv['StandardOutputContent'].strip().splitlines():
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            user, account, partition, elapsed_raw = parts[0], parts[1], parts[2], parts[3]
+            try:
+                elapsed = int(elapsed_raw)
+            except:
+                continue
+            inst_type = PCLUSTER_PARTITION_MAP.get(partition)
+            if not inst_type:
+                continue
+            if inst_type not in usage:
+                usage[inst_type] = {}
+            if user not in usage[inst_type]:
+                usage[inst_type][user] = {'elapsed': 0, 'account': account}
+            usage[inst_type][user]['elapsed'] += elapsed
+        return usage
+    except:
+        return {}
+
+
+# 매핑 조회 API
+@cost_monitoring_bp.route('/mappings', methods=['GET'])
+def get_mappings():
+    return jsonify(_load_mappings())
+
+# 매핑 업데이트 API
+from flask import request
+
+@cost_monitoring_bp.route('/mappings/<category>', methods=['PUT'])
+def update_mappings(category):
+    valid = ['project_name_to_code', 'project_code_mapping', 'uid_to_username', 'instance_names']
+    if category not in valid:
+        return jsonify({'error': f'invalid category, use: {valid}'}), 400
+    m = _load_mappings()
+    m[category] = request.json
+    _save_mappings(m)
+    _invalidate_mappings_cache()
+    _daily_cache.clear()
+    _monthly_cache.clear()
+    return jsonify({'status': 'ok', 'category': category})
+
+
+def resolve_slurm_project(account, username, existing_user_projects):
+    """Slurm Account에서 프로젝트 코드 추출. 실패시 기존 매핑 사용."""
+    import re as _re
+    if account and account != username:
+        m = _re.match(r'^([a-zA-Z]\d{5,6})', account)
+        if m:
+            return m.group(1).upper()
+    if username in existing_user_projects and existing_user_projects[username]:
+        return get_project_info(list(existing_user_projects[username])[0])["code"]
+    return "프로젝트 미식별"
+
+def is_valid_project(project_name):
+    """유효한 프로젝트인지 확인"""
+    if not project_name or project_name == "unknown":
+        return False
+    
+    # 시스템 디렉토리 제외
+    system_dirs = [
+        '.vscode-server', 'miniconda3', 'programs', 'notebooks', 
+        'cost-agent', 'mogam_project', 'code', 'ray', 'notes',
+        'project', 'files', 'old_cds_bart_v2', 'ROUTE', 'materials'
+    ]
+    if project_name in system_dirs:
+        return False
+    
+    # 패턴 기반 제외
+    if project_name.startswith('tmp') or project_name.startswith('pip-install'):  # 임시 파일/디렉토리
+        return False
+    if re.match(r'^\d{2}-\d{2}-\d{2}$', project_name):  # 타임스탬프
+        return False
+    if re.match(r'^\d+$', project_name):  # 숫자만
+        return False
+    if project_name.endswith('_홈'):  # 홈 디렉토리
+        return False
+    if project_name.startswith('_unknown_'):  # 미식별 사용자
+        return False
+    if re.match(r'^[a-zA-Z0-9]{8}$', project_name):  # 랜덤 해시 (예: 6QiDcIMU)
+        return False
+    if project_name.startswith('ms-'):  # 확장 프로그램
+        return False
+    
+    return True
+
+
+def get_project_info(project_name):
+    if project_name in _mp.PROJECT_NAME_TO_CODE:
+        code = _mp.PROJECT_NAME_TO_CODE[project_name]
+        return {"code": code, "description": _mp.PROJECT_CODE_MAPPING.get(code, "")}
+    match = re.match(r"^([A-Z]\d{6})_", project_name)
+    if match:
+        code = match.group(1)
+        return {"code": code, "description": _mp.PROJECT_CODE_MAPPING.get(code, "")}
+    if project_name == "프로젝트 미식별":
+        return {"code": "프로젝트 미식별", "description": "Slurm 계정 매핑 미완료"}
+    return {"code": project_name, "description": ""}
+def resolve_username(uid_str):
+    if uid_str.startswith("uid_"):
+        try:
+            uid = int(uid_str.split("_")[1])
+            return _mp.UID_TO_USERNAME.get(uid, uid_str)
+        except:
+            return uid_str
+    try:
+        uid = int(uid_str)
+        return _mp.UID_TO_USERNAME.get(uid, uid_str)
+    except:
+        return uid_str
+
+_daily_cache = {}
+
+_partition_repaired = set()
+
+def _ensure_cur_partition(year, month):
+    key = f"{year}-{month}"
+    if key in _partition_repaired:
+        return
+    try:
+        athena = boto3.client('athena', region_name='us-west-2')
+        athena.start_query_execution(
+            QueryString=f"ALTER TABLE cur_database.mogam_hourly_cur ADD IF NOT EXISTS PARTITION (year='{year}', month='{month}')",
+            QueryExecutionContext={'Database': 'cur_database'},
+            ResultConfiguration={'OutputLocation': 's3://mogam-or-cur-stg/athena-results/'}
+        )
+        _partition_repaired.add(key)
+    except:
+        pass
+
+def get_cost_data(date):
+    from datetime import datetime as _dtc
+    dt_parsed = _dtc.strptime(date, '%Y-%m-%d')
+    _ensure_cur_partition(dt_parsed.year, dt_parsed.month)
+    if date in _daily_cache:
+        cached = _daily_cache[date]
+        if (_dtc.now() - cached['ts']).seconds < 3600:
+            return cached['data']
+    # AWS 온디맨드 가격 기반 GPU:CPU 비율
+    INSTANCE_GPU_RATIO = {
+        'i-004e23df368dcb30e': 0.852,   # p5.4xlarge
+        'i-06a9b5df345d47eaa': 0.852,  # p4d.24xlarge
+        'i-0d53ba43b64510164': 0.852,  # p4de.24xlarge
+        'i-0dc3c13df82448939': 0.822,  # g5.12xlarge
+        'i-0c30cae12f60d69d1': 0.0,    # r7i.4xlarge
+        'i-074a73c3cf9656989': 0.635  # g4dn.xlarge
+    }
+    
+    dt = datetime.strptime(date, '%Y-%m-%d')
+    athena_client = boto3.client('athena', region_name='us-west-2')
+    
+    # 1. CUR - 인스턴스별 실제 비용 (RI 포함)
+    query_cur = f"""
+    SELECT line_item_resource_id, 
+           SUM(CASE 
+               WHEN line_item_line_item_type = 'Usage' THEN line_item_unblended_cost
+               WHEN line_item_line_item_type = 'DiscountedUsage' THEN reservation_effective_cost
+               WHEN line_item_line_item_type = 'SavingsPlanCoveredUsage' THEN savings_plan_savings_plan_effective_cost
+               ELSE 0 END) as cost,
+           MAX(product_instance_type) as inst_type,
+           SUM(pricing_public_on_demand_cost) as ondemand_cost,
+           MAX(CASE WHEN line_item_line_item_type='DiscountedUsage' THEN 'RI'
+                    WHEN line_item_line_item_type='SavingsPlanCoveredUsage' THEN 'SP'
+                    WHEN line_item_line_item_type='Usage' THEN 'OD' ELSE '' END) as pricing_type
+    FROM cur_database.mogam_hourly_cur
+    WHERE DATE(line_item_usage_start_date) = DATE('{date}')
+      AND line_item_product_code = 'AmazonEC2'
+      AND line_item_resource_id LIKE 'i-%'
+    GROUP BY line_item_resource_id
+    """
+    
+    r_cur = athena_client.start_query_execution(
+        QueryString=query_cur,
+        QueryExecutionContext={'Database': 'cur_database'},
+        ResultConfiguration={'OutputLocation': 's3://mogam-or-cur-stg/athena-results/'}
+    )
+    
+    # 월 누적 쿼리 (병렬 실행)
+    query_mtd = f"""
+    SELECT SUM(CASE
+        WHEN line_item_line_item_type = 'Usage' THEN line_item_unblended_cost
+        WHEN line_item_line_item_type = 'DiscountedUsage' THEN reservation_effective_cost
+        WHEN line_item_line_item_type = 'SavingsPlanCoveredUsage' THEN savings_plan_savings_plan_effective_cost
+        ELSE 0 END) as cost
+    FROM cur_database.mogam_hourly_cur
+    WHERE year='{dt.year}' AND month='{dt.month}'
+      AND DATE(line_item_usage_start_date) <= DATE('{date}')
+      AND line_item_product_code = 'AmazonEC2'
+      AND line_item_resource_id LIKE 'i-%'
+    """
+    r_mtd = athena_client.start_query_execution(
+        QueryString=query_mtd,
+        QueryExecutionContext={'Database': 'cur_database'},
+        ResultConfiguration={'OutputLocation': 's3://mogam-or-cur-stg/athena-results/'}
+    )
+    
+    for _ in range(60):
+        status = athena_client.get_query_execution(QueryExecutionId=r_cur['QueryExecutionId'])
+        if status['QueryExecution']['Status']['State'] == 'SUCCEEDED':
+            break
+        time.sleep(1)
+    
+    res_cur = athena_client.get_query_results(QueryExecutionId=r_cur['QueryExecutionId'])
+    
+    # 월 누적 결과 대기
+    for _ in range(60):
+        status = athena_client.get_query_execution(QueryExecutionId=r_mtd['QueryExecutionId'])
+        if status['QueryExecution']['Status']['State'] == 'SUCCEEDED':
+            break
+        time.sleep(1)
+    res_mtd = athena_client.get_query_results(QueryExecutionId=r_mtd['QueryExecutionId'])
+    mtd_cost = float(res_mtd['ResultSet']['Rows'][1]['Data'][0].get('VarCharValue', '0')) if len(res_mtd['ResultSet']['Rows']) > 1 else 0
+    instance_costs = {}
+    instance_discount = {}
+    total_cost = 0
+    compute_nodes = defaultdict(lambda: {"count": 0, "cost": 0.0})
+    
+    for row in res_cur["ResultSet"]["Rows"][1:]:
+        vals = [col.get("VarCharValue", "") for col in row["Data"]]
+        cost = float(vals[1])
+        inst_type = vals[2] if len(vals) > 2 else ""
+        ondemand = float(vals[3]) if len(vals) > 3 and vals[3] else 0
+        ptype = vals[4] if len(vals) > 4 else "OD"
+        if vals[0] in INSTANCE_ORDER:
+            instance_costs[vals[0]] = cost
+            instance_discount[vals[0]] = {'ondemand': ondemand, 'pricing_type': ptype}
+            total_cost += cost
+        elif inst_type in PCLUSTER_INSTANCE_TYPES:
+            compute_nodes[inst_type]["count"] += 1
+            compute_nodes[inst_type]["cost"] += cost
+
+    
+    # 2. Enhanced Agent - 프로젝트별 사용 비율
+    query_agent = f"""
+    SELECT instance_id, p.project, p.username, 
+           COUNT(*) as samples, 
+           SUM(p.gpu_count) as gpu_count,
+           AVG(p.cpu_percent) as avg_cpu_percent,
+           AVG(p.gpu_memory_mb) as avg_gpu_mem_mb,
+           MAX(p.command) as command,
+           ARRAY_JOIN(ARRAY_SORT(ARRAY_DISTINCT(FLATTEN(ARRAY_AGG(p.gpu_devices)))), ',') as gpu_device_list
+    FROM cost_monitoring.enhanced_metrics_v2
+    CROSS JOIN UNNEST(processes) AS t(p)
+    WHERE year='{dt.year}' AND month='{dt.month:02d}' AND day='{dt.day:02d}'
+      AND instance_id != ''
+      AND p.project IS NOT NULL
+    GROUP BY instance_id, p.project, p.username
+    """
+    
+    r_agent = athena_client.start_query_execution(
+        QueryString=query_agent,
+        QueryExecutionContext={'Database': 'cost_monitoring'},
+        ResultConfiguration={'OutputLocation': 's3://mogam-or-cur-stg/athena-results/'}
+    )
+    
+    for _ in range(60):
+        status = athena_client.get_query_execution(QueryExecutionId=r_agent['QueryExecutionId'])
+        if status['QueryExecution']['Status']['State'] == 'SUCCEEDED':
+            break
+        time.sleep(1)
+    
+    res_agent = athena_client.get_query_results(QueryExecutionId=r_agent['QueryExecutionId'])
+    
+    # 인스턴스별 프로젝트별 데이터 집계 (가중치 기반)
+    instance_project_data = defaultdict(lambda: defaultdict(lambda: {
+        'weight': 0.0,
+        'samples': 0,
+        'users': defaultdict(lambda: {'samples': 0, 'weight': 0.0, 'gpu_count': 0})
+    }))
+    instance_total_weight = defaultdict(float)
+    instance_allocated = defaultdict(float)
+    
+    for row in res_agent['ResultSet']['Rows'][1:]:
+        vals = [col.get('VarCharValue', '') for col in row['Data']]
+        instance_id = vals[0]
+        project = vals[1]
+        username = resolve_username(vals[2])
+        if project == 'unknown':
+            if instance_id == 'i-004e23df368dcb30e' and dt <= datetime(2026, 2, 26):
+                project = 'P250001_LLM2'
+            else:
+                project = f'_unknown_{username}'
+        samples = int(vals[3])
+        gpu_count = int(vals[4] or 0)
+        avg_cpu_percent = float(vals[5] or 0)
+        avg_gpu_mem = float(vals[6] or 0) if len(vals) > 6 and vals[6] else 0
+        command = vals[7] if len(vals) > 7 else ''
+        gpu_device_list = vals[8] if len(vals) > 8 else ''
+        
+        # 가중치 = samples * (cpu_percent/100) * (1 + gpu_count)
+        # GPU 사용 시 CPU 0%여도 최소 가중치 부여
+        if gpu_count > 0:
+            # GPU 사용 시: 최소 CPU 10% 가정
+            effective_cpu = max(avg_cpu_percent, 10.0)
+            weight = samples * (effective_cpu / 100.0) * (1.0 + gpu_count)
+        else:
+            weight = samples * (avg_cpu_percent / 100.0) * (1.0 + gpu_count)
+        
+        # 집계
+        instance_total_weight[instance_id] += weight
+        instance_project_data[instance_id][project]['weight'] += weight
+        instance_project_data[instance_id][project]['samples'] += samples
+        instance_project_data[instance_id][project]['users'][username]['samples'] += samples
+        instance_project_data[instance_id][project]['users'][username]['weight'] += weight
+        instance_project_data[instance_id][project]['users'][username]['gpu_count'] += gpu_count
+        instance_project_data[instance_id][project]['users'][username]['avg_gpu_mem'] = avg_gpu_mem
+        instance_project_data[instance_id][project]['users'][username]['command'] = command
+        instance_project_data[instance_id][project]['users'][username]['avg_cpu'] = avg_cpu_percent
+        instance_project_data[instance_id][project]['users'][username]['gpu_device_list'] = gpu_device_list
+    
+    # 전체 GPU:CPU 비율 계산 (모든 재배분에 사용)
+    total_gpu_cost = sum(instance_costs.get(iid, 0) * INSTANCE_GPU_RATIO.get(iid, 0) for iid in instance_costs)
+    global_gpu_ratio = total_gpu_cost / total_cost if total_cost > 0 else 0
+    
+    # 3. 프로젝트별 비용 배분 (1차) - 가중치 기반
+    proj_costs = defaultdict(lambda: {'total_cost': 0, 'gpu_cost': 0, 'cpu_cost': 0, 'users': set(), 'samples': 0})
+    user_costs = defaultdict(lambda: {'total_cost': 0, 'gpu_cost': 0, 'cpu_cost': 0, 'projects': set()})
+    
+    
+    # 1차 배분: 인스턴스별 → 프로젝트별 → 유저별 (가중치 기반)
+    for instance_id, projects in instance_project_data.items():
+        instance_cost = instance_costs.get(instance_id, 0)
+        if instance_cost == 0:
+            continue
+            
+        total_weight = instance_total_weight[instance_id]
+        if total_weight == 0:
+            continue
+        
+        
+        for project, proj_data in projects.items():
+            # 프로젝트 비용 배분
+            project_allocated = instance_cost * (proj_data['weight'] / total_weight)
+            instance_allocated[instance_id] += project_allocated
+            
+            proj_costs[project]['total_cost'] += project_allocated
+            proj_costs[project]['samples'] += proj_data['samples']
+            
+            # GPU:CPU 비율 적용
+            if global_gpu_ratio > 0:
+                gpu_portion = project_allocated * global_gpu_ratio
+                cpu_portion = project_allocated * (1 - global_gpu_ratio)
+                proj_costs[project]['gpu_cost'] += gpu_portion
+                proj_costs[project]['cpu_cost'] += cpu_portion
+            else:
+                proj_costs[project]['cpu_cost'] += project_allocated
+            
+            # 유저별 비용 배분
+            project_total_weight = proj_data['weight']
+            if project_total_weight > 0:
+                for username, user_data in proj_data['users'].items():
+                    proj_costs[project]['users'].add(username)
+                    
+                    user_allocated = project_allocated * (user_data['weight'] / project_total_weight)
+                    user_costs[username]['total_cost'] += user_allocated
+                    user_costs[username]['projects'].add(project)
+                    
+                    # GPU:CPU 비율 적용
+                    if global_gpu_ratio > 0:
+                        user_costs[username]['gpu_cost'] += user_allocated * global_gpu_ratio
+                        user_costs[username]['cpu_cost'] += user_allocated * (1 - global_gpu_ratio)
+                    else:
+                        user_costs[username]['cpu_cost'] += user_allocated
+    
+    # 4. 인스턴스별 미배분 비용 재배분
+    for instance_id, instance_cost in instance_costs.items():
+        unallocated = instance_cost - instance_allocated.get(instance_id, 0)
+        
+        if unallocated <= 1:  # 1달러 미만 무시
+            continue
+        
+        # 해당 인스턴스를 사용한 프로젝트만 필터링
+        if instance_id not in instance_project_data:
+            continue
+        
+        projects = instance_project_data[instance_id]
+        total_weight = sum(p['weight'] for p in projects.values())
+        
+        if total_weight == 0:
+            continue
+        
+        
+        # 가중치 비율로 재배분
+        for project, proj_data in projects.items():
+            project_additional = unallocated * (proj_data['weight'] / total_weight)
+            proj_costs[project]['total_cost'] += project_additional
+            
+            # GPU:CPU 비율 적용
+            if global_gpu_ratio > 0:
+                proj_costs[project]['gpu_cost'] += project_additional * global_gpu_ratio
+                proj_costs[project]['cpu_cost'] += project_additional * (1 - global_gpu_ratio)
+            else:
+                proj_costs[project]['cpu_cost'] += project_additional
+            
+            # 유저별 재배분
+            project_total_weight = proj_data['weight']
+            if project_total_weight > 0:
+                for username, user_data in proj_data['users'].items():
+                    user_additional = project_additional * (user_data['weight'] / project_total_weight)
+                    user_costs[username]['total_cost'] += user_additional
+                    user_costs[username]['projects'].add(project)
+                    
+                    # GPU:CPU 비율 적용
+                    if global_gpu_ratio > 0:
+                        user_costs[username]['gpu_cost'] += user_additional * global_gpu_ratio
+                        user_costs[username]['cpu_cost'] += user_additional * (1 - global_gpu_ratio)
+                    else:
+                        user_costs[username]['cpu_cost'] += user_additional
+    # 5. 컴퓨트 노드 비용 -> sacct 기반 프로젝트/사용자 배분
+    compute_total = sum(d['cost'] for d in compute_nodes.values())
+    if compute_total > 1:
+        existing_user_projects = {u: d['projects'] for u, d in user_costs.items()}
+        sacct_usage = get_sacct_compute_usage(date)
+        for inst_type, type_data in compute_nodes.items():
+            type_cost = type_data['cost']
+            if type_cost < 0.5 or inst_type not in sacct_usage:
+                continue
+            users = sacct_usage[inst_type]
+            total_elapsed = sum(u['elapsed'] for u in users.values())
+            if total_elapsed == 0:
+                continue
+            cn_projects = set()
+            for username, udata in users.items():
+                share = type_cost * (udata['elapsed'] / total_elapsed)
+                project = resolve_slurm_project(udata['account'], username, existing_user_projects)
+                cn_projects.add(project)
+                proj_costs[project]['total_cost'] += share
+                proj_costs[project]['cpu_cost'] += share
+                proj_costs[project]['users'].add(username)
+                user_costs[username]['total_cost'] += share
+                user_costs[username]['cpu_cost'] += share
+                user_costs[username]['projects'].add(project)
+            compute_nodes[inst_type]['projects'] = sorted(cn_projects)
+        total_cost += compute_total
+
+    _result = {
+        'date': date,
+        'total_cost': total_cost,
+        'mtd_cost': mtd_cost,
+        'proj_costs': proj_costs,
+        'user_costs': user_costs,
+        'instance_costs': instance_costs,
+        'instance_discount': instance_discount,
+        'compute_nodes': dict(compute_nodes),
+        'instance_project_data': instance_project_data,
+        'validation': {
+            'cur_total': total_cost,
+            'allocated_before': sum(instance_allocated.values()),
+            'project_sum': sum(d['total_cost'] for d in proj_costs.values()),
+            'unallocated': total_cost - sum(d['total_cost'] for d in proj_costs.values()),
+            'allocated_percentage': (sum(d['total_cost'] for d in proj_costs.values()) / total_cost * 100) if total_cost > 0 else 0
+        }
+    }
+    _daily_cache[date] = {'data': _result, 'ts': _dtc.now()}
+    return _result
+
+@cost_monitoring_bp.route('/daily-costs/<date>', methods=['GET'])
+def get_daily_costs(date):
+    try:
+        data = get_cost_data(date)
+        
+        # 프로젝트 코드별로 합치기
+        code_aggregated = defaultdict(lambda: {
+            'total_cost': 0, 'gpu_cost': 0, 'cpu_cost': 0, 
+            'users': set(), 'description': '', 'names': set()
+        })
+        
+        # _unknown_ 프로젝트를 해당 사용자의 다른 프로젝트로 합산
+        unknown_remap = {}
+        for p in list(data["proj_costs"].keys()):
+            if p.startswith('_unknown_'):
+                uname = p.replace('_unknown_', '')
+                # 해당 사용자의 다른 프로젝트 찾기
+                target = None
+                for op, od in data["proj_costs"].items():
+                    if not op.startswith('_unknown_') and uname in od.get('users', set()) and od['total_cost'] > 0:
+                        target = op
+                        break
+                if not target:
+                    for ou, ud in data["user_costs"].items():
+                        if ou == uname and ud['projects']:
+                            for pp in ud['projects']:
+                                if not pp.startswith('_unknown_'):
+                                    target = pp
+                                    break
+                            break
+                if target:
+                    for k in ('total_cost', 'gpu_cost', 'cpu_cost'):
+                        data["proj_costs"][target][k] += data["proj_costs"][p][k]
+                    data["proj_costs"][target]['users'].update(data["proj_costs"][p]['users'])
+                    del data["proj_costs"][p]
+                else:
+                    # target 없으면 user_costs에서도 차감 (정합성)
+                    if uname in data["user_costs"]:
+                        for k in ('total_cost', 'gpu_cost', 'cpu_cost'):
+                            data["user_costs"][uname][k] = max(0, data["user_costs"][uname][k] - data["proj_costs"][p].get(k, 0))
+                    del data["proj_costs"][p]
+
+        # invalid 프로젝트 비용을 user_costs에서 차감 (정합성, 음수 방지)
+        for p, d in list(data["proj_costs"].items()):
+            if not is_valid_project(p):
+                for u in d.get('users', set()):
+                    if u in data['user_costs']:
+                        for k in ('total_cost', 'gpu_cost', 'cpu_cost'):
+                            data['user_costs'][u][k] = max(0, data['user_costs'][u][k] - d.get(k, 0))
+
+        for p, d in data["proj_costs"].items():
+            if not is_valid_project(p): continue
+            info = get_project_info(p)
+            code = info["code"]
+            code_aggregated[code]['total_cost'] += d["total_cost"]
+            code_aggregated[code]['gpu_cost'] += d["gpu_cost"]
+            code_aggregated[code]['cpu_cost'] += d["cpu_cost"]
+            code_aggregated[code]['users'].update(d["users"])
+            code_aggregated[code]['description'] = info["description"]
+            code_aggregated[code]['names'].add(p)
+        
+        projects = []
+        for code, d in code_aggregated.items():
+            if d['total_cost'] < 1:
+                continue
+            projects.append({
+                "code": code,
+                "name": code,
+                "description": d["description"],
+                "total_cost": round(d["total_cost"], 2),
+                "gpu_cost": round(d["gpu_cost"], 2),
+                "cpu_cost": round(d["cpu_cost"], 2),
+                "users": sorted([resolve_username(u) for u in d["users"] if data.get('user_costs',{}).get(u,{}).get('total_cost',0) > 1])
+            })
+        # 프로젝트별 compute_nodes 매핑
+        for p in projects:
+            p['compute_nodes'] = {t: {'count': cn['count'], 'cost_usd': round(cn['cost'], 2), 'cost_krw': round(cn['cost'] * 1440, 2)} for t, cn in data.get('compute_nodes', {}).items() if p['code'] in cn.get('projects', [])}
+        projects.sort(key=lambda x: x["total_cost"], reverse=True)
+        valid_project_codes = set(p['code'] for p in projects if p['total_cost'] > 1)
+        proj_user_set = {p['code']: set(p.get('users', [])) for p in projects}
+        users = [{'username': resolve_username(u), 'total_cost': round(d['total_cost'], 2), 'gpu_cost': round(d['gpu_cost'], 2),
+                  'cpu_cost': round(d['cpu_cost'], 2), 'projects': sorted(set(pc for p in d['projects'] if not p.startswith('_unknown_') and is_valid_project(p) for pc in [get_project_info(p)['code']] if pc in valid_project_codes and resolve_username(u) in proj_user_set.get(pc, set())))} 
+                 for u, d in data['user_costs'].items()]
+        users.sort(key=lambda x: x['total_cost'], reverse=True)
+        
+        # 비례 정규화: user 합산 = 배분 비용 (total - unalloc)
+        allocated = data['total_cost'] - (data['total_cost'] - sum(d['total_cost'] for d in data['proj_costs'].values() if is_valid_project(d.get('_key', '')) or True))
+        user_sum = sum(u['total_cost'] for u in users)
+        proj_sum = sum(p['total_cost'] for p in projects)
+        if user_sum > 0 and abs(user_sum - proj_sum) > 0.01:
+            ratio = proj_sum / user_sum
+            for u in users:
+                u['total_cost'] = round(u['total_cost'] * ratio, 2)
+                u['gpu_cost'] = round(u['gpu_cost'] * ratio, 2)
+                u['cpu_cost'] = round(u['cpu_cost'] * ratio, 2)
+
+        # 인스턴스별 데이터 생성
+        instances = {}
+        for instance_id, cost in data.get('instance_costs', {}).items():
+            gpu_ratio = {
+                'i-004e23df368dcb30e': 0.852,
+                'i-06a9b5df345d47eaa': 0.852,
+                'i-0d53ba43b64510164': 0.852,
+                'i-0dc3c13df82448939': 0.822,
+                'i-0c30cae12f60d69d1': 0.0,
+                'i-074a73c3cf9656989': 0.635
+            }.get(instance_id, 0)
+            
+            # 인스턴스에서 실행된 프로젝트 수집
+            inst_projects = set()
+            if instance_id in data.get('instance_project_data', {}):
+                for proj, pdata in data['instance_project_data'][instance_id].items():
+                    if pdata.get('weight', 0) == 0:
+                        continue
+                    if proj.startswith('_unknown_'):
+                        uname = proj.replace('_unknown_', '')
+                        for op, od in data['instance_project_data'][instance_id].items():
+                            if not op.startswith('_unknown_'):
+                                info2 = get_project_info(op)
+                                if info2['code'] in valid_project_codes:
+                                    inst_projects.add(info2['code'])
+                        for uc, ud in data['user_costs'].items():
+                            if uc == uname:
+                                for pp in ud['projects']:
+                                    if not pp.startswith('_unknown_'):
+                                        c = get_project_info(pp)['code']
+                                        if c in valid_project_codes:
+                                            inst_projects.add(c)
+                        continue
+                    if not is_valid_project(proj):
+                        continue
+                    info = get_project_info(proj)
+                    code = info['code']
+                    # code_aggregated에서 비용 $1 이상인 프로젝트만 포함
+                    if code in valid_project_codes:
+                        inst_projects.add(code)
+            
+
+            # 주요 6개 인스턴스만 포함
+            if instance_id in INSTANCE_ORDER:
+                disc = data.get('instance_discount', {}).get(instance_id, {})
+                od = disc.get('ondemand', 0)
+                pt = disc.get('pricing_type', 'OD')
+                instances[instance_id] = {
+                    'name': _mp.INSTANCE_NAMES.get(instance_id, instance_id),
+                    'type': INSTANCE_TYPES.get(instance_id, instance_id),
+                    'instance_id': instance_id,
+                    'total_cost_usd': round(cost, 2),
+                    'total_cost_krw': round(cost * 1440, 2),
+                    'gpu_cost': round(cost * gpu_ratio, 2),
+                    'cpu_cost': round(cost * (1 - gpu_ratio), 2),
+                    'projects': sorted(list(inst_projects)),
+                    'pricing_type': pt,
+                    'ondemand_cost_usd': round(od, 2),
+                    'discount_pct': round((1 - cost/od) * 100, 1) if od > 0 else 0,
+                    'savings_usd': round(od - cost, 2) if od > 0 else 0
+                }
+
+        agent_raw = []
+        for iid, ipd_projects in data.get('instance_project_data', {}).items():
+            iname = _mp.INSTANCE_NAMES.get(iid, iid)
+            for proj, pdata in ipd_projects.items():
+                if pdata.get('weight', 0) == 0:
+                    continue
+                info = get_project_info(proj)
+                for uname, ud in pdata.get('users', {}).items():
+                    if ud.get('weight', 0) == 0:
+                        continue
+                    s = ud.get('samples', 1) or 1
+                    agent_raw.append({
+                        'instance': iname,
+                        'project': info['code'],
+                        'user': resolve_username(uname),
+                        'command': ud.get('command', ''),
+                        'samples': ud.get('samples', 0),
+                        'avg_gpu_count': round(ud.get('gpu_count', 0) / s, 1),
+                        'gpu_devices': ud.get('gpu_device_list', ''),
+                        'avg_cpu_pct': round(ud.get('avg_cpu', 0), 1),
+                        'avg_gpu_mem_mb': round(ud.get('avg_gpu_mem', 0), 1),
+                        'weight': round(ud.get('weight', 0), 1)
+                    })
+        agent_raw.sort(key=lambda x: -x['weight'])
+
+        return jsonify({
+            'date': date,
+            'total_cost': round(data['total_cost'], 2),
+            'data_source': 'CUR reservation_effective_cost (100% allocated)',
+            'projects': projects,
+            'users': users,
+            'instances': {k: instances[k] for k in INSTANCE_ORDER if k in instances},
+            'compute_nodes': {t: {'count': d['count'], 'cost_usd': round(d['cost'], 2), 'cost_krw': round(d['cost'] * 1440, 2), 'projects': d.get('projects', [])} for t, d in data.get('compute_nodes', {}).items() if d['cost'] > 0.5},
+            'validation': {
+                'cur_total': round(data['validation']['cur_total'], 2),
+                'allocated_before': round(data['validation']['allocated_before'], 2),
+                'unallocated': round(data['validation']['unallocated'], 2),
+                'project_sum': round(data['validation']['project_sum'], 2),
+                'allocated_percentage': round(data['validation']['allocated_percentage'], 1)
+            },
+            'unallocated_cost': round(data['total_cost'] - sum(p['total_cost'] for p in projects), 2),
+            'agent_raw': agent_raw,
+            'monthly_accumulated': round(data['total_cost'] + sum(_daily_cache.get(f'{date[:7]}-{d:02d}', {}).get('data', {}).get('total_cost', 0) for d in range(1, int(date.split("-")[2]))), 2),
+            'days_elapsed': int(date.split('-')[2])
+        })
+        
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e), 'date': date}), 500
+
+@cost_monitoring_bp.route('/finops/daily/<date>', methods=['GET'])
+def get_finops_daily(date):
+    try:
+        data = get_cost_data(date)
+        
+        projects = []
+        for p, d in data["proj_costs"].items():
+            info = get_project_info(p)
+            if not is_valid_project(p): continue
+            if d['total_cost'] < 1: continue
+            projects.append({
+                "project": info["code"],
+                "description": info["description"],
+                "total_cost": round(d["total_cost"], 2),
+                "gpu_cost": round(d["gpu_cost"], 2),
+                "cpu_cost": round(d["cpu_cost"], 2),
+                "users": sorted([resolve_username(u) for u in d["users"] if data.get('user_costs',{}).get(u,{}).get('total_cost',0) > 1])
+            })
+        projects.sort(key=lambda x: x['total_cost'], reverse=True)
+        valid_project_codes = set(p['project'] for p in projects if p['total_cost'] > 1)
+        
+        users = [{'username': resolve_username(u), 'total_cost': round(d['total_cost'], 2), 'gpu_cost': round(d['gpu_cost'], 2),
+                  'cpu_cost': round(d['cpu_cost'], 2), 'projects': sorted(set(pc for p in d['projects'] if not p.startswith('_unknown_') and is_valid_project(p) for pc in [get_project_info(p)['code']] if pc in valid_project_codes and resolve_username(u) in proj_user_set.get(pc, set())))} 
+                 for u, d in data['user_costs'].items()]
+        users.sort(key=lambda x: x['total_cost'], reverse=True)
+        
+        # 비례 정규화: user 합산 = 배분 비용 (total - unalloc)
+        allocated = data['total_cost'] - (data['total_cost'] - sum(d['total_cost'] for d in data['proj_costs'].values() if is_valid_project(d.get('_key', '')) or True))
+        user_sum = sum(u['total_cost'] for u in users)
+        proj_sum = sum(p['total_cost'] for p in projects)
+        if user_sum > 0 and abs(user_sum - proj_sum) > 0.01:
+            ratio = proj_sum / user_sum
+            for u in users:
+                u['total_cost'] = round(u['total_cost'] * ratio, 2)
+                u['gpu_cost'] = round(u['gpu_cost'] * ratio, 2)
+                u['cpu_cost'] = round(u['cpu_cost'] * ratio, 2)
+
+        # 인스턴스별 데이터 생성
+        instances = {}
+        for instance_id, cost in data.get('instance_costs', {}).items():
+            gpu_ratio = {
+                'i-004e23df368dcb30e': 0.852,
+                'i-06a9b5df345d47eaa': 0.852,
+                'i-0d53ba43b64510164': 0.852,
+                'i-0dc3c13df82448939': 0.822,
+                'i-0c30cae12f60d69d1': 0.0,
+                'i-074a73c3cf9656989': 0.635
+            }.get(instance_id, 0)
+            
+            # 인스턴스에서 실행된 프로젝트 수집
+            inst_projects = set()
+            if instance_id in data.get('instance_project_data', {}):
+                for proj, pdata in data['instance_project_data'][instance_id].items():
+                    if pdata.get('weight', 0) == 0:
+                        continue
+                    if proj.startswith('_unknown_'):
+                        uname = proj.replace('_unknown_', '')
+                        for op, od in data['instance_project_data'][instance_id].items():
+                            if not op.startswith('_unknown_'):
+                                info2 = get_project_info(op)
+                                if info2['code'] in valid_project_codes:
+                                    inst_projects.add(info2['code'])
+                        for uc, ud in data['user_costs'].items():
+                            if uc == uname:
+                                for pp in ud['projects']:
+                                    if not pp.startswith('_unknown_'):
+                                        c = get_project_info(pp)['code']
+                                        if c in valid_project_codes:
+                                            inst_projects.add(c)
+                        continue
+                    if not is_valid_project(proj):
+                        continue
+                    info = get_project_info(proj)
+                    code = info['code']
+                    # proj_code_costs에서 비용 $1 이상인 프로젝트만 포함
+                    if code in valid_project_codes:
+                        inst_projects.add(code)
+            
+            # 주요 6개 인스턴스만 포함
+            if instance_id in INSTANCE_ORDER:
+                disc = data.get('instance_discount', {}).get(instance_id, {})
+                od = disc.get('ondemand', 0)
+                pt = disc.get('pricing_type', 'OD')
+                instances[instance_id] = {
+                    'name': _mp.INSTANCE_NAMES.get(instance_id, instance_id),
+                    'type': INSTANCE_TYPES.get(instance_id, instance_id),
+                    'instance_id': instance_id,
+                    'total_cost_usd': round(cost, 2),
+                    'total_cost_krw': round(cost * 1440, 2),
+                    'gpu_cost': round(cost * gpu_ratio, 2),
+                    'cpu_cost': round(cost * (1 - gpu_ratio), 2),
+                    'projects': sorted(list(inst_projects)),
+                    'pricing_type': pt,
+                    'ondemand_cost_usd': round(od, 2),
+                    'discount_pct': round((1 - cost/od) * 100, 1) if od > 0 else 0,
+                    'savings_usd': round(od - cost, 2) if od > 0 else 0
+                }
+
+        
+        return jsonify({
+            'success': True,
+            'date': date,
+            'total_cost': round(data['total_cost'], 2),
+            'projects': projects,
+            'users': users,
+            'instances': {k: instances[k] for k in INSTANCE_ORDER if k in instances},
+            'compute_nodes': {t: {'count': d['count'], 'cost_usd': round(d['cost'], 2), 'cost_krw': round(d['cost'] * 1440, 2), 'projects': d.get('projects', [])} for t, d in data.get('compute_nodes', {}).items() if d['cost'] > 0.5},
+            'validation': data['validation']
+        })
+        
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@cost_monitoring_bp.route('/finops/daily-cost-allocation/<date>', methods=['GET'])
+def get_finops_daily_cost_allocation(date):
+    try:
+        data = get_cost_data(date)
+        
+        projects = []
+        for p, d in data["proj_costs"].items():
+            info = get_project_info(p)
+            if not is_valid_project(p): continue
+            if d['total_cost'] < 1: continue
+            projects.append({
+                "project": info["code"],
+                "description": info["description"],
+                "total_cost": round(d["total_cost"], 2),
+                "gpu_cost": round(d["gpu_cost"], 2),
+                "cpu_cost": round(d["cpu_cost"], 2),
+                "users": sorted([resolve_username(u) for u in d["users"] if data.get('user_costs',{}).get(u,{}).get('total_cost',0) > 1])
+            })
+        projects.sort(key=lambda x: x['total_cost'], reverse=True)
+        
+        return jsonify({
+            'date': date,
+            'summary': {
+                'total_cost': round(data['total_cost'], 2),
+                'allocated_percentage': 100.0
+            },
+            'projects': projects
+        })
+        
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+_monthly_cache = {}
+
+def get_monthly_cost_data(year, month):
+    """월별 비용 = 일별 결과 합산 (정확성 보장)"""
+    import calendar, requests
+    from datetime import datetime as _dt, date as _date
+    
+    cache_key = f"{year}-{month}"
+    cached = _monthly_cache.get(cache_key)
+    if cached and ((_dt.now() - cached['ts']).seconds < 3600):
+        return cached['data']
+    
+    days_in_month = calendar.monthrange(int(year), int(month))[1]
+    today = _date.today()
+    
+    total_cost = 0.0
+    proj_agg = defaultdict(lambda: {'total_cost': 0, 'gpu_cost': 0, 'cpu_cost': 0, 'users': set(), 'compute_nodes': {}})
+    user_agg = defaultdict(lambda: {'total_cost': 0, 'gpu_cost': 0, 'cpu_cost': 0, 'projects': set()})
+    inst_agg = {}
+    cn_agg = defaultdict(lambda: {'count': 0, 'cost': 0.0, 'projects': set()})
+    unalloc_sum = 0.0
+    agent_raw_agg = defaultdict(lambda: {'command': '', 'samples': 0, 'gpu_count': 0, 'gpu_devices': set(), 'avg_cpu_pct': 0, 'avg_gpu_mem_mb': 0, 'weight': 0, 'days': 0})
+    
+    min_date = _date(2026, 1, 24)
+    for day in range(1, days_in_month + 1):
+        date_str = f"{year}-{int(month):02d}-{day:02d}"
+        d = _date.fromisoformat(date_str)
+        if d > today:
+            break
+        if d < min_date:
+            continue
+        try:
+            resp = requests.get(f'http://localhost:5000/api/cost-monitoring/daily-costs/{date_str}', timeout=30)
+            if resp.status_code != 200:
+                continue
+            d = resp.json()
+        except:
+            continue
+        
+        total_cost += d.get('total_cost', 0)
+        unalloc_sum += d.get('unallocated_cost', 0)
+        
+        for p in d.get('projects', []):
+            code = p['code']
+            proj_agg[code]['total_cost'] += p['total_cost']
+            proj_agg[code]['gpu_cost'] += p['gpu_cost']
+            proj_agg[code]['cpu_cost'] += p['cpu_cost']
+            proj_agg[code]['users'].update(p.get('users', []))
+            for cnt, cn in p.get('compute_nodes', {}).items():
+                if cnt not in proj_agg[code]['compute_nodes']:
+                    proj_agg[code]['compute_nodes'][cnt] = {'count': 0, 'cost_usd': 0, 'cost_krw': 0}
+                proj_agg[code]['compute_nodes'][cnt]['count'] = max(proj_agg[code]['compute_nodes'][cnt]['count'], cn.get('count', 0))
+                proj_agg[code]['compute_nodes'][cnt]['cost_usd'] += cn.get('cost_usd', 0)
+                proj_agg[code]['compute_nodes'][cnt]['cost_krw'] += cn.get('cost_krw', 0)
+        
+        for u in d.get('users', []):
+            uname = u['username']
+            user_agg[uname]['total_cost'] += u['total_cost']
+            user_agg[uname]['gpu_cost'] += u['gpu_cost']
+            user_agg[uname]['cpu_cost'] += u['cpu_cost']
+            user_agg[uname]['projects'].update(u.get('projects', []))
+        
+        for iid, inst in d.get('instances', {}).items():
+            if iid not in inst_agg:
+                inst_agg[iid] = {k: inst[k] for k in ('name','type','instance_id')}
+                inst_agg[iid]['total_cost_usd'] = 0
+                inst_agg[iid]['gpu_cost'] = 0
+                inst_agg[iid]['cpu_cost'] = 0
+                inst_agg[iid]['ondemand_cost_usd'] = 0
+                inst_agg[iid]['savings_usd'] = 0
+                inst_agg[iid]['projects'] = set()
+            inst_agg[iid]['total_cost_usd'] += inst['total_cost_usd']
+            inst_agg[iid]['gpu_cost'] += inst['gpu_cost']
+            inst_agg[iid]['cpu_cost'] += inst['cpu_cost']
+            inst_agg[iid]['ondemand_cost_usd'] += inst.get('ondemand_cost_usd', 0) or 0
+            inst_agg[iid]['savings_usd'] += inst.get('savings_usd', 0) or 0
+            inst_agg[iid]['pricing_type'] = inst.get('pricing_type', 'OD')
+            inst_agg[iid]['projects'].update(inst.get('projects', []))
+        
+        for r in d.get('agent_raw', []):
+            key = (r['instance'], r['project'], r['user'])
+            a = agent_raw_agg[key]
+            a['command'] = r.get('command', '')
+            a['samples'] += r.get('samples', 0)
+            a['gpu_count'] += r.get('avg_gpu_count', 0)
+            for gd in (r.get('gpu_devices', '') or '').split(','):
+                if gd.strip():
+                    a['gpu_devices'].add(gd.strip())
+            a['avg_cpu_pct'] += r.get('avg_cpu_pct', 0)
+            a['avg_gpu_mem_mb'] += r.get('avg_gpu_mem_mb', 0)
+            a['weight'] += r.get('weight', 0)
+            a['days'] += 1
+
+        for t, cn in d.get('compute_nodes', {}).items():
+            cn_agg[t]['count'] = max(cn_agg[t]['count'], cn.get('count', 0))
+            cn_agg[t]['cost'] += cn.get('cost_usd', 0)
+            cn_agg[t]['projects'].update(cn.get('projects', []))
+    
+    agent_raw_list = []
+    for (inst, proj, user), a in agent_raw_agg.items():
+        d = a['days'] or 1
+        agent_raw_list.append({
+            'instance': inst, 'project': proj, 'user': user,
+            'command': a['command'], 'samples': a['samples'],
+            'avg_gpu_count': round(a['gpu_count'] / d, 1),
+            'gpu_devices': ','.join(sorted(a['gpu_devices'])),
+            'avg_cpu_pct': round(a['avg_cpu_pct'] / d, 1),
+            'avg_gpu_mem_mb': round(a['avg_gpu_mem_mb'] / d, 1),
+            'weight': round(a['weight'], 1)
+        })
+    agent_raw_list.sort(key=lambda x: -x['weight'])
+
+    result = {
+        'total_cost': total_cost,
+        'unallocated_cost': unalloc_sum,
+        'proj_agg': proj_agg,
+        'user_agg': user_agg,
+        'inst_agg': inst_agg,
+        'cn_agg': cn_agg,
+        'agent_raw': agent_raw_list,
+    }
+    _monthly_cache[cache_key] = {'data': result, 'ts': _dt.now()}
+    return result
+
+@cost_monitoring_bp.route('/monthly-costs/<year>/<month>', methods=['GET'])
+def get_monthly_costs(year, month):
+    """월별 비용 = 일별 API 결과 합산"""
+    try:
+        data = get_monthly_cost_data(year, month)
+        
+        projects = []
+        for code, d in data['proj_agg'].items():
+            if d['total_cost'] < 1:
+                continue
+            projects.append({
+                'code': code, 'name': code,
+                'description': _mp.PROJECT_CODE_MAPPING.get(code, ''),
+                'total_cost': round(d['total_cost'], 2),
+                'gpu_cost': round(d['gpu_cost'], 2),
+                'cpu_cost': round(d['cpu_cost'], 2),
+                'users': sorted(list(d['users'])),
+                'compute_nodes': {t: {'count': cn['count'], 'cost_usd': round(cn['cost_usd'], 2), 'cost_krw': round(cn['cost_krw'], 2)} for t, cn in d.get('compute_nodes', {}).items() if cn.get('cost_usd', 0) > 0.5}
+            })
+        projects.sort(key=lambda x: x['total_cost'], reverse=True)
+        valid_project_codes = set(p['code'] for p in projects if p['total_cost'] > 1)
+        proj_user_set = {p['code']: set(p.get('users', [])) for p in projects}
+        
+        users = []
+        for uname, d in data['user_agg'].items():
+            if d['total_cost'] < 1:
+                continue
+            users.append({
+                'username': uname,
+                'total_cost': round(d['total_cost'], 2),
+                'gpu_cost': round(d['gpu_cost'], 2),
+                'cpu_cost': round(d['cpu_cost'], 2),
+                'projects': sorted([p for p in d['projects'] if p in valid_project_codes and uname in data['proj_agg'].get(p, {}).get('users', set())])
+            })
+        users.sort(key=lambda x: x['total_cost'], reverse=True)
+        
+        # 비례 정규화: user 합산 = proj 합산
+        proj_sum = sum(p['total_cost'] for p in projects)
+        user_sum_m = sum(u['total_cost'] for u in users)
+        if user_sum_m > 0 and abs(user_sum_m - proj_sum) > 0.01:
+            ratio_m = proj_sum / user_sum_m
+            for u in users:
+                u['total_cost'] = round(u['total_cost'] * ratio_m, 2)
+                u['gpu_cost'] = round(u['gpu_cost'] * ratio_m, 2)
+                u['cpu_cost'] = round(u['cpu_cost'] * ratio_m, 2)
+
+        instances = {}
+        for iid, inst in data['inst_agg'].items():
+            inst_copy = dict(inst)
+            inst_copy['total_cost_usd'] = round(inst['total_cost_usd'], 2)
+            inst_copy['total_cost_krw'] = round(inst['total_cost_usd'] * 1440, 2)
+            inst_copy['gpu_cost'] = round(inst['gpu_cost'], 2)
+            inst_copy['cpu_cost'] = round(inst['cpu_cost'], 2)
+            inst_copy['projects'] = sorted([p for p in inst['projects'] if p in valid_project_codes])
+            od = inst_copy.get('ondemand_cost_usd', 0) or 0
+            inst_copy['ondemand_cost_usd'] = round(od, 2)
+            inst_copy['savings_usd'] = round(inst_copy.get('savings_usd', 0) or 0, 2)
+            inst_copy['discount_pct'] = round((1 - inst_copy['total_cost_usd'] / od) * 100, 1) if od > 0 else 0
+            instances[iid] = inst_copy
+        
+        cn_out = {}
+        for t, cn in data['cn_agg'].items():
+            if cn['cost'] > 0.5:
+                cn_out[t] = {'count': cn['count'], 'cost_usd': round(cn['cost'], 2), 'cost_krw': round(cn['cost'] * 1440, 2), 'projects': sorted(list(cn['projects']))}
+        
+        proj_sum = sum(p['total_cost'] for p in projects)
+        
+        return jsonify({
+            'year': year, 'month': month,
+            'total_cost': round(data['total_cost'], 2),
+            'data_source': 'Daily Aggregation (FinOps 0-tier)',
+            'projects': projects,
+            'users': users,
+            'instances': {k: instances[k] for k in INSTANCE_ORDER if k in instances},
+            'compute_nodes': cn_out,
+            'validation': {
+                'cur_total': round(data['total_cost'], 2),
+                'allocated_before': round(proj_sum, 2),
+                'project_sum': round(proj_sum, 2)
+            },
+            'unallocated_cost': round(data['unallocated_cost'], 2),
+            'agent_raw': data.get('agent_raw', [])
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e), 'year': year, 'month': month}), 500
+
+
+@cost_monitoring_bp.route('/clear-cache', methods=['POST'])
+def clear_cache():
+    _daily_cache.clear()
+    _monthly_cache.clear()
+    return jsonify({'status': 'ok'})
+
+def warmup_cache():
+    """서버 시작 시 캐시 워밍업"""
+    import threading, time
+    def _warmup():
+        time.sleep(3)
+        from datetime import date as _d, timedelta
+        today = _d.today()
+        # 최근 35일 일별 캐시
+        for i in range(35):
+            d = today - timedelta(days=i)
+            try:
+                get_cost_data(d.isoformat())
+            except:
+                pass
+        # 현재 월 + 이전 월 월별 캐시
+        import requests
+        for ym in [f"{today.year}/{today.month:02d}", f"{(today.replace(day=1) - timedelta(days=1)).year}/{(today.replace(day=1) - timedelta(days=1)).month:02d}"]:
+            try:
+                requests.get(f"http://localhost:5000/api/cost-monitoring/monthly-costs/{ym}", timeout=300)
+            except:
+                pass
+    threading.Thread(target=_warmup, daemon=True).start()
+
+warmup_cache()

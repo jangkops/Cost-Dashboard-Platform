@@ -1,0 +1,7 @@
+---
+# [핵심] S3를 아예 안 쓰도록 '파이프' 모드로 강제 설정
+# S3 버킷 권한이나 이름 설정이 필요 없어집니다.
+ansible_aws_ssm_transfer_method: pipe
+
+# 혹시 모르니 bucket_name은 null로 둡니다.
+ansible_aws_ssm_bucket_name: null

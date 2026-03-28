@@ -1,0 +1,185 @@
+{
+  "infrastructure_types": {
+    "standalone": {
+      "description": "독립 실행 인스턴스",
+      "instance_types": ["p4d", "p4de", "g5", "g4dn", "r7"]
+    },
+    "parallel_cluster": {
+      "description": "ParallelCluster 큐 기반",
+      "head_node": "g4dn",
+      "compute_queues": ["c7i", "c6i", "c6a", "m6i", "r6i"]
+    }
+  },
+  "instance_mapping": {
+    "i-0dc3c13df82448939": {
+      "username": "admin",
+      "project_code": "P240001",
+      "instance_type": "c5.12xlarge",
+      "infrastructure_type": "standalone",
+      "gpu_count": 0,
+      "vcpu_count": 48
+    },
+    "i-0d53ba43b64510164": {
+      "username": "hermee",
+      "project_code": "P240006",
+      "instance_type": "p4d.24xlarge",
+      "infrastructure_type": "standalone",
+      "gpu_count": 8,
+      "vcpu_count": 96
+    },
+    "i-06a9b5df345d47eaa": {
+      "username": "yjgo",
+      "project_code": "P240019",
+      "instance_type": "p4d.24xlarge",
+      "infrastructure_type": "standalone",
+      "gpu_count": 8,
+      "vcpu_count": 96
+    },
+    "i-0e170ada014db202b": {
+      "username": "testuser",
+      "project_code": "P240002",
+      "instance_type": "g4dn.xlarge",
+      "infrastructure_type": "parallel_cluster_head",
+      "gpu_count": 1,
+      "vcpu_count": 4
+    },
+    "i-0839f03897f0abd69": {
+      "username": "researcher1",
+      "project_code": "P240007",
+      "instance_type": "c7i.2xlarge",
+      "infrastructure_type": "parallel_cluster_compute",
+      "parent_cluster": "cluster-ml-training",
+      "queue_name": "cpu-queue",
+      "gpu_count": 0,
+      "vcpu_count": 8
+    },
+    "i-0c30cae12f60d69d1": {
+      "username": "researcher2",
+      "project_code": "P240008",
+      "instance_type": "c6i.4xlarge",
+      "infrastructure_type": "parallel_cluster_compute",
+      "parent_cluster": "cluster-data-processing",
+      "queue_name": "compute-queue",
+      "gpu_count": 0,
+      "vcpu_count": 16
+    },
+    "i-074a73c3cf9656989": {
+      "username": "analyst",
+      "project_code": "P240009",
+      "instance_type": "r7.2xlarge",
+      "infrastructure_type": "standalone",
+      "gpu_count": 0,
+      "vcpu_count": 8
+    }
+  },
+  "user_projects": {
+    "admin": {
+      "projects": ["P240001", "P240002"],
+      "primary_project": "P240001"
+    },
+    "hermee": {
+      "projects": ["P240006", "P240007"],
+      "primary_project": "P240006"
+    },
+    "yjgo": {
+      "projects": ["P240019", "P240020"],
+      "primary_project": "P240019"
+    },
+    "testuser": {
+      "projects": ["P240002"],
+      "primary_project": "P240002"
+    },
+    "researcher1": {
+      "projects": ["P240007", "P240010"],
+      "primary_project": "P240007"
+    },
+    "researcher2": {
+      "projects": ["P240008", "P240011"],
+      "primary_project": "P240008"
+    },
+    "analyst": {
+      "projects": ["P240009"],
+      "primary_project": "P240009"
+    }
+  },
+  "project_mapping": {
+    "P240001": {
+      "project_name": "Infrastructure Management",
+      "cost_center": "CC001",
+      "budget_limit": 5000
+    },
+    "P240002": {
+      "project_name": "ML Development",
+      "cost_center": "CC002",
+      "budget_limit": 3000
+    },
+    "P240006": {
+      "project_name": "AI Training - Large Models",
+      "cost_center": "CC003",
+      "budget_limit": 15000
+    },
+    "P240007": {
+      "project_name": "HPC Computing",
+      "cost_center": "CC003",
+      "budget_limit": 8000
+    },
+    "P240008": {
+      "project_name": "Data Processing Pipeline",
+      "cost_center": "CC004",
+      "budget_limit": 6000
+    },
+    "P240009": {
+      "project_name": "Memory Intensive Analytics",
+      "cost_center": "CC004",
+      "budget_limit": 4000
+    },
+    "P240010": {
+      "project_name": "Parallel Computing Research",
+      "cost_center": "CC003",
+      "budget_limit": 7000
+    },
+    "P240011": {
+      "project_name": "Big Data Analytics",
+      "cost_center": "CC004",
+      "budget_limit": 5500
+    },
+    "P240019": {
+      "project_name": "Deep Learning Research",
+      "cost_center": "CC005",
+      "budget_limit": 20000
+    },
+    "P240020": {
+      "project_name": "Computer Vision",
+      "cost_center": "CC005",
+      "budget_limit": 12000
+    }
+  },
+  "cluster_mapping": {
+    "cluster-ml-training": {
+      "head_node": "i-0e170ada014db202b",
+      "queues": {
+        "cpu-queue": {
+          "instance_types": ["c7i.2xlarge", "c7i.4xlarge"],
+          "max_instances": 10
+        },
+        "gpu-queue": {
+          "instance_types": ["g5.xlarge", "g5.2xlarge"],
+          "max_instances": 5
+        }
+      }
+    },
+    "cluster-data-processing": {
+      "head_node": "i-0e170ada014db202b",
+      "queues": {
+        "compute-queue": {
+          "instance_types": ["c6i.4xlarge", "c6i.8xlarge"],
+          "max_instances": 20
+        },
+        "memory-queue": {
+          "instance_types": ["r6i.2xlarge", "r6i.4xlarge"],
+          "max_instances": 8
+        }
+      }
+    }
+  }
+}

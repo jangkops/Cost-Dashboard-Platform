@@ -1,0 +1,44 @@
+---
+- name: Deploy Cost Monitoring Agent
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    # [핵심] 플레이북 위치 기준으로 'files/' 폴더를 바라봄 (상대 경로)
+    local_src: "files/"
+    remote_dest: "/opt/cost-monitoring"
+
+  tasks:
+    - name: 1. Create remote directory
+      file:
+        path: "{{ remote_dest }}"
+        state: directory
+        mode: '0755'
+
+    - name: 2. Copy application files
+      copy:
+        src: "{{ local_src }}"
+        dest: "{{ remote_dest }}"
+        # files/agent/* --> /opt/cost-monitoring/agent/*
+        # files/config/* --> /opt/cost-monitoring/config/*
+        mode: '0644'
+        directory_mode: '0755'
+
+    - name: 3. Ensure Docker is running
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: 4. Deploy with Docker Compose
+      community.docker.docker_compose:
+        project_src: "{{ remote_dest }}/agent"
+        build: yes
+        state: present
+        recreate: always
+      register: output
+
+    - name: 5. Prune unused images
+      shell: docker image prune -f
+      when: output.changed

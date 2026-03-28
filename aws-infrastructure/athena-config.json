@@ -1,0 +1,9 @@
+{
+  "workgroup": {
+    "name": "cost-monitoring",
+    "state": "ENABLED",
+    "engine_version": "Athena engine version 3",
+    "result_output_location": "s3://mogam-or-cur-stg/athena-results/",
+    "enforce_workgroup_configuration": true
+  }
+}

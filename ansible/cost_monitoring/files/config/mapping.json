@@ -1,0 +1,32 @@
+{
+    "meta": {
+        "version": "v9.0-Simplified",
+        "description": "Simplified project mapping based on actual /fsx/home structure"
+    },
+    "system_accounts": [
+        "root", "ubuntu", "ssm-user", "daemon", "nobody", "mogam", "cgjang"
+    ],
+    "known_users": {
+        "aychoi": "Candidate_MA",
+        "bskim": "P230006",
+        "ckkang": "P240001", 
+        "enhuh": "MI25003",
+        "hblee": "P240010",
+        "hermee": "P240014",
+        "hklee": "P230022",
+        "hslee": "P230005",
+        "intern": "Intern_project",
+        "jhhong": "P240001",
+        "jwlee": "P240002",
+        "jykim2": "P240010",
+        "sbkim": "MI25001",
+        "shlee": "P240001",
+        "shlee2": "P240001",
+        "srpark": "Candidate_Druggability",
+        "ybkim": "P240002",
+        "yjgo": "MI25002",
+        "ymbaek": "P230006",
+        "yokim": "MI25003"
+    },
+    "fallback_project": "Unassigned_User"
+}

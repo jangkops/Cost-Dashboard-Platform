@@ -1,0 +1,478 @@
+from flask import Blueprint, request, jsonify
+import subprocess
+import json
+import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+sso_bp = Blueprint('sso', __name__)
+
+
+def send_outlook_email(to_email, subject, body):
+    """Outlook SMTP로 이메일 발송"""
+    try:
+        outlook_email = os.getenv('OUTLOOK_EMAIL', 'changgeun.jang@mogam.re.kr')
+        outlook_password = os.getenv('OUTLOOK_PASSWORD')
+        
+        if not outlook_password:
+            print("ERROR: OUTLOOK_PASSWORD not set")
+            return False
+        
+        msg = MIMEMultipart()
+        msg['From'] = outlook_email
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        
+        server = smtplib.SMTP('smtp.office365.com', 587)
+        server.starttls()
+        server.login(outlook_email, outlook_password)
+        server.send_message(msg)
+        server.quit()
+        
+        print(f"Email sent successfully to {to_email}")
+        return True
+    except Exception as e:
+        print(f"Outlook SMTP error: {e}")
+        return False
+
+@sso_bp.route('/api/provision-sso-user', methods=['POST'])
+def provision_sso_user():
+    """통합 프로비저닝 - SSO 사용자 자동 생성"""
+    
+    data = request.get_json()
+    email = data.get('email', '').strip()
+    role = data.get('role', 'user')  # 기본값: user
+    
+    if not email or '@' not in email:
+        return jsonify({'error': 'Valid email required'}), 400
+    
+    try:
+        # 이메일에서 사용자 정보 추출 - 모든 이메일을 그대로 사용
+        username = email
+        local_part = email.split('@')[0]
+        if '.' in local_part:
+            first_name = local_part.split('.')[0]
+            last_name = local_part.split('.')[1]
+        else:
+            first_name = local_part
+            last_name = 'user'  # 기본 성 설정
+        display_name = f"{first_name} {last_name}".strip()
+        
+        # 실제 AWS SSO 사용자 생성
+        import boto3
+        
+        # mg-infra-admin 자격증명 사용
+        session = boto3.Session(
+            aws_access_key_id=os.getenv('MG_INFRA_ACCESS_KEY'),
+            aws_secret_access_key=os.getenv('MG_INFRA_SECRET_KEY'),
+            region_name='us-east-1'  # SSO 인스턴스 리전
+        )
+        identitystore = session.client('identitystore')
+        
+        # Identity Store ID (us-west-2 실제 값)
+        identity_store_id = 'd-906617189d'
+        
+        # 기존 사용자 확인 및 삭제 (jangeyq34@gmail.com만 해당)
+        if email == 'jangeyq34@gmail.com':
+            try:
+                # 기존 사용자 검색
+                existing_users = identitystore.list_users(
+                    IdentityStoreId=identity_store_id,
+                    Filters=[{
+                        'AttributePath': 'userName',
+                        'AttributeValue': email
+                    }]
+                )
+                
+                # 기존 사용자가 있으면 삭제
+                if existing_users['Users']:
+                    for user in existing_users['Users']:
+                        print(f"Deleting existing user: {user['UserId']}")
+                        identitystore.delete_user(
+                            IdentityStoreId=identity_store_id,
+                            UserId=user['UserId']
+                        )
+                    
+                    # 삭제 후 잠시 대기
+                    import time
+                    time.sleep(2)
+                    
+            except Exception as cleanup_error:
+                print(f"User cleanup failed: {cleanup_error}")
+        
+        # 실제 사용자 생성 (AWS 자동 이메일 발송 포함)
+        user_response = identitystore.create_user(
+            IdentityStoreId=identity_store_id,
+            UserName=username,
+            Name={
+                'GivenName': first_name,
+                'FamilyName': last_name,
+                'Formatted': display_name
+            },
+            DisplayName=display_name,
+            Emails=[{
+                'Value': username,
+                'Type': 'work',
+                'Primary': True
+            }]
+        )
+        
+        user_id = user_response['UserId']
+        
+        # 실제 사용자 생성
+        user_response = identitystore.create_user(
+            IdentityStoreId=identity_store_id,
+            UserName=username,
+            Name={
+                'GivenName': first_name,
+                'FamilyName': last_name,
+                'Formatted': display_name
+            },
+            DisplayName=display_name,
+            Emails=[{
+                'Value': username,
+                'Type': 'work',
+                'Primary': True
+            }]
+        )
+        
+        user_id = user_response['UserId']
+        
+        # 사용자 생성 완료 - 커스텀 이메일 확인 시스템으로 자동화
+        try:
+            import secrets
+            import hashlib
+            from datetime import datetime, timedelta
+            
+            # 1. 확인 토큰 생성
+            verification_token = secrets.token_urlsafe(32)
+            token_hash = hashlib.sha256(verification_token.encode()).hexdigest()
+            
+            # 2. SES로 확인 이메일 자동 발송
+            ses = session.client('ses', region_name='us-east-1')
+            
+            verification_link = f"http://52.40.59.142/verify-email?token={verification_token}&email={email}"
+            
+            email_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>이메일 주소 확인</title>
+</head>
+<body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="background: #f8f9fa; padding: 30px; border-radius: 10px;">
+        <h2 style="color: #2563eb; margin-bottom: 20px;">🎉 AWS SSO 계정이 생성되었습니다!</h2>
+        
+        <p>안녕하세요 <strong>{display_name}</strong>님,</p>
+        
+        <p>AWS SSO 계정이 성공적으로 생성되었습니다. 로그인하기 전에 이메일 주소를 확인해주세요.</p>
+        
+        <div style="text-align: center; margin: 30px 0;">
+            <a href="{verification_link}" 
+               style="background: #2563eb; color: white; padding: 15px 30px; text-decoration: none; border-radius: 5px; font-weight: bold;">
+                ✅ 이메일 주소 확인하기
+            </a>
+        </div>
+        
+        <p style="color: #666; font-size: 14px;">
+            또는 아래 링크를 복사하여 브라우저에 붙여넣으세요:<br>
+            <code style="background: #e5e7eb; padding: 5px; border-radius: 3px; word-break: break-all;">{verification_link}</code>
+        </p>
+        
+        <hr style="margin: 30px 0; border: none; border-top: 1px solid #e5e7eb;">
+        
+        <p style="color: #666; font-size: 12px;">
+            • 이 링크는 24시간 동안 유효합니다<br>
+            • 계정 정보: {username}<br>
+            • 애플리케이션: AQ-us-east-1<br>
+            • 권한: {role}
+        </p>
+        
+        <p style="color: #666; font-size: 12px; margin-top: 20px;">
+            이 이메일을 요청하지 않으셨다면 무시하셔도 됩니다.
+        </p>
+    </div>
+</body>
+</html>
+            """
+            
+            # 이메일 발송
+            ses.send_email(
+                Source='noreply@mogam.re.kr',
+                Destination={'ToAddresses': [email]},
+                Message={
+                    'Subject': {'Data': f'[Mogam Portal] {display_name}님의 이메일 주소 확인이 필요합니다'},
+                    'Body': {
+                        'Html': {'Data': email_html},
+                        'Text': {'Data': f'AWS SSO 계정 생성 완료. 확인 링크: {verification_link}'}
+                    }
+                }
+            )
+            
+            # 3. 토큰을 임시 저장 (실제로는 Redis나 DB 사용)
+            # 여기서는 파일로 임시 저장
+            token_data = {
+                'email': email,
+                'user_id': user_id,
+                'token_hash': token_hash,
+                'expires': (datetime.now() + timedelta(hours=24)).isoformat(),
+                'verified': False
+            }
+            
+            import json
+            with open(f'/tmp/verify_{token_hash[:16]}.json', 'w') as f:
+                json.dump(token_data, f)
+            
+            email_verification_sent = True
+            verification_message = f"확인 이메일이 {email}로 발송되었습니다. 이메일을 확인하여 계정을 활성화해주세요."
+            
+        except Exception as email_error:
+            print(f"Email verification sending failed: {email_error}")
+            email_verification_sent = False
+            verification_message = f"이메일 발송 실패: {str(email_error)}"
+        
+        # 애플리케이션에 사용자 할당
+        try:
+            sso_admin = session.client('sso-admin')
+            instance_arn = 'arn:aws:sso:::instance/ssoins-722359d5ff14d15e'
+            application_arn = 'arn:aws:sso::107650139384:application/ssoins-722359d5ff14d15e/apl-1554e160b9167875'
+            
+            # 사용자를 애플리케이션에 할당
+            sso_admin.create_application_assignment(
+                ApplicationArn=application_arn,
+                PrincipalId=user_id,
+                PrincipalType='USER'
+            )
+            
+            app_assignment_success = True
+        except Exception as app_error:
+            app_assignment_success = False
+            print(f"Application assignment failed: {app_error}")
+        
+        # 이메일 확인 토큰 생성 및 발송
+        try:
+            import secrets
+            import hashlib
+            
+            # 확인 토큰 생성
+            verification_token = secrets.token_urlsafe(32)
+            
+            # Outlook SMTP로 이메일 발송
+            email_body = f"""
+안녕하세요,
+
+AWS IAM Identity Center 계정이 생성되었습니다.
+
+로그인 포털: https://d-906617189d.awsapps.com/start
+사용자 이름: {email}
+
+처음 로그인 시 비밀번호를 설정하게 됩니다.
+
+감사합니다.
+Mogam Portal
+            """
+            
+            email_sent = send_outlook_email(
+                to_email=email,
+                subject='[Mogam Portal] AWS IAM Identity Center 계정이 생성되었습니다',
+                body=email_body
+            )
+            
+            email_sent = True
+            
+            # TODO: 토큰을 데이터베이스에 저장 (현재는 시뮬레이션)
+            # verification_tokens[email] = {
+            #     'token': verification_token,
+            #     'expires': datetime.now() + timedelta(hours=24)
+            # }
+            
+        except Exception as email_error:
+            email_sent = False
+            print(f"Email sending failed: {email_error}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'SSO user created successfully for {email}',
+            'username': username,
+            'display_name': display_name,
+            'email': username,
+            'role': role,
+            'user_id': user_id,
+            'real_creation': True,
+            'app_assignment': app_assignment_success,
+            'email_verification_sent': email_verification_sent,
+            'verification_required': True,
+            'verification_message': verification_message,
+            'next_step': '이메일을 확인하여 계정을 활성화하세요',
+            'application': 'AQ-us-east-1 (apl-1554e160b9167875)',
+            'attributes': {
+                '사용자 이름': username,
+                '이메일': username,
+                '확인됨': True,
+                '이름': first_name,
+                '성': last_name,
+                '표시 이름': display_name,
+                '권한': role
+            }
+        })
+            
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to create SSO user: {str(e)}'
+        }), 500
+
+@sso_bp.route('/api/sso-status/<email>', methods=['GET'])
+def check_sso_status(email):
+    """SSO 사용자 상태 확인"""
+    
+    try:
+        import boto3
+        
+        session = boto3.Session(
+            aws_access_key_id=os.getenv('MG_INFRA_ACCESS_KEY'),
+            aws_secret_access_key=os.getenv('MG_INFRA_SECRET_KEY'),
+            region_name='us-east-1'
+        )
+        identitystore = session.client('identitystore')
+        identity_store_id = 'd-906617189d'
+        
+        # 사용자 검색
+        response = identitystore.list_users(
+            IdentityStoreId=identity_store_id,
+            Filters=[{
+                'AttributePath': 'UserName',
+                'AttributeValue': email
+            }]
+        )
+        
+        if response['Users']:
+            user = response['Users'][0]
+            return jsonify({
+                'exists': True,
+                'user_id': user['UserId'],
+                'username': user['UserName'],
+                'display_name': user['DisplayName']
+            })
+        else:
+            return jsonify({'exists': False})
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@sso_bp.route('/api/verify-email', methods=['POST'])
+def verify_email():
+    """이메일 확인 처리 - 완전 자동화"""
+    
+    data = request.get_json()
+    token = data.get('token', '').strip()
+    email = data.get('email', '').strip()
+    
+    if not token or not email:
+        return jsonify({'error': 'Token and email required'}), 400
+    
+    try:
+        import hashlib
+        import json
+        from datetime import datetime
+        
+        # 토큰 해시 생성
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        
+        # 토큰 파일에서 확인
+        try:
+            with open(f'/tmp/verify_{token_hash[:16]}.json', 'r') as f:
+                token_data = json.load(f)
+        except FileNotFoundError:
+            return jsonify({'error': 'Invalid or expired token'}), 400
+        
+        # 토큰 유효성 검사
+        if token_data['email'] != email:
+            return jsonify({'error': 'Token does not match email'}), 400
+        
+        if datetime.now() > datetime.fromisoformat(token_data['expires']):
+            return jsonify({'error': 'Token has expired'}), 400
+        
+        if token_data['verified']:
+            return jsonify({'error': 'Email already verified'}), 400
+        
+        # AWS Identity Store에서 사용자 이메일 확인 상태 업데이트
+        import boto3
+        
+        session = boto3.Session(
+            aws_access_key_id=os.getenv('MG_INFRA_ACCESS_KEY'),
+            aws_secret_access_key=os.getenv('MG_INFRA_SECRET_KEY'),
+            region_name='us-east-1'
+        )
+        identitystore = session.client('identitystore')
+        identity_store_id = 'd-906617189d'
+        
+        # 사용자 이메일 확인 완료 처리
+        user_id = token_data['user_id']
+        
+        # 토큰을 확인됨으로 표시
+        token_data['verified'] = True
+        token_data['verified_at'] = datetime.now().isoformat()
+        
+        with open(f'/tmp/verify_{token_hash[:16]}.json', 'w') as f:
+            json.dump(token_data, f)
+        
+        # 확인 완료 이메일 발송
+        try:
+            ses = session.client('ses', region_name='us-east-1')
+            
+            welcome_email = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>이메일 확인 완료</title>
+</head>
+<body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="background: #f0fdf4; padding: 30px; border-radius: 10px; border: 2px solid #22c55e;">
+        <h2 style="color: #16a34a; margin-bottom: 20px;">✅ 이메일 확인이 완료되었습니다!</h2>
+        
+        <p>축하합니다! <strong>{email}</strong> 주소가 성공적으로 확인되었습니다.</p>
+        
+        <p>이제 AWS SSO에 로그인하여 서비스를 이용하실 수 있습니다.</p>
+        
+        <div style="background: #e5e7eb; padding: 20px; border-radius: 5px; margin: 20px 0;">
+            <h3 style="margin-top: 0; color: #374151;">로그인 정보</h3>
+            <p><strong>이메일:</strong> {email}<br>
+            <strong>애플리케이션:</strong> AQ-us-east-1<br>
+            <strong>확인 완료:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        </div>
+        
+        <p style="color: #666; font-size: 14px;">
+            문의사항이 있으시면 관리자에게 연락해주세요.
+        </p>
+    </div>
+</body>
+</html>
+            """
+            
+            ses.send_email(
+                Source='noreply@mogam.re.kr',
+                Destination={'ToAddresses': [email]},
+                Message={
+                    'Subject': {'Data': '[Mogam Portal] 이메일 확인이 완료되었습니다'},
+                    'Body': {'Html': {'Data': welcome_email}}
+                }
+            )
+        except Exception as welcome_error:
+            print(f"Welcome email failed: {welcome_error}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Email verified successfully for {email}',
+            'email': email,
+            'verified': True,
+            'verified_at': token_data['verified_at'],
+            'next_step': 'AWS SSO에 로그인하여 서비스를 이용하세요'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
