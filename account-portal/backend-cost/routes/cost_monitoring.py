@@ -268,14 +268,14 @@ def get_cost_data(date):
         cached = _daily_cache[date]
         if (_dtc.now() - cached['ts']).seconds < 3600:
             return cached['data']
-    # AWS 온디맨드 가격 기반 GPU:CPU 비율
+    # GPU 비율: On-Demand 가격 - vCPU당 $0.048 차감 (us-west-2)
     INSTANCE_GPU_RATIO = {
-        'i-004e23df368dcb30e': 0.852,   # p5.4xlarge
-        'i-06a9b5df345d47eaa': 0.852,  # p4d.24xlarge
-        'i-0d53ba43b64510164': 0.852,  # p4de.24xlarge
-        'i-0dc3c13df82448939': 0.822,  # g5.12xlarge
+        'i-004e23df368dcb30e': 0.833,   # p5.48xlarge   ($55.040-$9.216)/$55.040
+        'i-06a9b5df345d47eaa': 0.790,  # p4d.24xlarge  ($21.958-$4.608)/$21.958
+        'i-0d53ba43b64510164': 0.832,  # p4de.24xlarge ($27.447-$4.608)/$27.447
+        'i-0dc3c13df82448939': 0.594,  # g5.12xlarge   ($5.672-$2.304)/$5.672
         'i-0c30cae12f60d69d1': 0.0,    # r7i.4xlarge
-        'i-074a73c3cf9656989': 0.635  # g4dn.xlarge
+        'i-074a73c3cf9656989': 0.635,  # g4dn.xlarge   ($0.526-$0.192)/$0.526
     }
     
     dt = datetime.strptime(date, '%Y-%m-%d')
@@ -753,10 +753,10 @@ def get_daily_costs(date):
         instances = {}
         for instance_id, cost in data.get('instance_costs', {}).items():
             gpu_ratio = {
-                'i-004e23df368dcb30e': 0.852,
-                'i-06a9b5df345d47eaa': 0.852,
-                'i-0d53ba43b64510164': 0.852,
-                'i-0dc3c13df82448939': 0.822,
+                'i-004e23df368dcb30e': 0.833,
+                'i-06a9b5df345d47eaa': 0.790,
+                'i-0d53ba43b64510164': 0.832,
+                'i-0dc3c13df82448939': 0.594,
                 'i-0c30cae12f60d69d1': 0.0,
                 'i-074a73c3cf9656989': 0.635,
             }.get(instance_id, 0)
@@ -1029,8 +1029,11 @@ def get_monthly_cost_data(year, month):
     
     cache_key = f"{year}-{month}"
     cached = _monthly_cache.get(cache_key)
-    if cached and ((_dt.now() - cached['ts']).seconds < 3600):
-        return cached['data']
+    if cached:
+        is_past = (int(year), int(month)) < (_kst_today().year, _kst_today().month)
+        ttl = 86400 if is_past else 3600  # 과거 월 24h, 현재 월 1h
+        if (_dt.now() - cached['ts']).total_seconds() < ttl:
+            return cached['data']
     
     days_in_month = calendar.monthrange(int(year), int(month))[1]
     today = _kst_today()

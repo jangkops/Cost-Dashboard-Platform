@@ -15,6 +15,8 @@ from routes.github_routes import github_bp
 from routes.user_access_logs import user_access_logs_bp
 from routes.audit_logs import audit_logs_bp
 from routes.integrated_provisioning import integrated_provisioning_bp
+from routes.gateway_approval import gateway_approval_bp
+from routes.gateway_usage import gateway_usage_bp
 
 load_dotenv()
 
@@ -35,7 +37,8 @@ app.register_blueprint(user_access_logs_bp)
 app.register_blueprint(audit_logs_bp)
 app.register_blueprint(sso_bp)
 app.register_blueprint(integrated_provisioning_bp)
-app.register_blueprint(integrated_provisioning_bp)
+app.register_blueprint(gateway_approval_bp)
+app.register_blueprint(gateway_usage_bp)
 
 @app.route('/health')
 def health():
@@ -55,4 +58,4 @@ except:
     print('AWS credentials not available')
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host="0.0.0.0", port=5000)

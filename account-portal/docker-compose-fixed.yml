@@ -8,6 +8,8 @@ services:
     volumes:
       - ./nginx/nginx-host.conf:/etc/nginx/conf.d/default.conf:ro
       - ./frontend/dist:/usr/share/nginx/html:ro
+      - ./nginx/selfsigned.crt:/etc/nginx/ssl/selfsigned.crt:ro
+      - ./nginx/selfsigned.key:/etc/nginx/ssl/selfsigned.key:ro
     restart: unless-stopped
 
   backend-admin:
@@ -16,13 +18,17 @@ services:
     expose:
       - "5000"
     volumes:
-      - /home/app/ansible:/home/app/ansible:ro
+      - /home/app/ansible:/home/app/ansible:rw
       - /var/log/auth.log:/var/log/auth.log:ro
       - /home/ubuntu/.aws:/root/.aws:ro
       - ./backend-admin/data:/app/data
     environment:
       - AWS_DEFAULT_REGION=us-west-2
       - AWS_EC2_METADATA_DISABLED=false
+      - BEDROCK_GW_ENV=dev
+      - SES_SENDER_EMAIL=mogam.infra.admin-noreply@mogam.re.kr
+      - SES_APPROVER_EMAIL=changgeun.jang@mogam.re.kr
+      - SES_REGION=us-east-1
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
