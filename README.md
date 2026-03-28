@@ -1,2 +1,2 @@
 # cost-monitoring-platform
-aws athena,glue,cur,s3 / 병렬 수집 docker agent 기반 프로젝트별 리소스(gpu,cpu등) 비용 산출 대시보드
+Aws Athena,Glue,Cur,S3,FSx / 실시간 병렬 추적,수집 Docker Agent 기반 프로젝트별 리소스(GPU,CPU등) 비용 산출 대시보드
