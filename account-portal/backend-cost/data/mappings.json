@@ -3,6 +3,7 @@
     "0_ai_agent": "INTERNAL",
     "ADMET-UC-MultiModal": "P240014",
     "AbDev": "MI25002",
+    "Baysian_Conformal_Regression": "INTERNAL",
     "Candidate_Antibody": "poc: Candidate_Antibody",
     "Candidate_CVI": "poc: Candidate_CVI",
     "Candidate_Druggability": "poc: Candidate_Druggability",
@@ -57,16 +58,19 @@
     "agent": "MI25001",
     "antibody": "MI25002",
     "cds_bart_v2": "MI25001",
+    "flow_matching": "INTERNAL",
     "k_melloddy": "P240014",
     "mRNA_LLM2": "P250001",
     "mars": "poc: mibr-mars",
     "matamouse": "INTERNAL",
     "metamouse": "INTERNAL",
+    "mibr-bot": "poc: mibr-mars",
     "mibr-mars": "poc: mibr-mars",
     "mle-star": "MI25004",
     "projects": "INTERNAL",
+    "propermab_*": "MI25002",
     "pu-learning": "MI25003",
-    "mibr-bot": "poc: mibr-mars"
+    "GLWS*": "MI25003"
   },
   "project_code_mapping": {
     "INTERNAL": "사용자 개인 프로젝트",

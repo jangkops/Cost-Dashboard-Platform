@@ -268,7 +268,7 @@ def get_cost_data(date):
         cached = _daily_cache[date]
         if (_dtc.now() - cached['ts']).seconds < 3600:
             return cached['data']
-    # GPU 비율: On-Demand 가격 - vCPU당 $0.048 차감 (us-west-2)
+    # GPU 비율: On-Demand 가격 - m5 vCPU당 $0.048 차감 (us-west-2)
     INSTANCE_GPU_RATIO = {
         'i-004e23df368dcb30e': 0.833,   # p5.48xlarge   ($55.040-$9.216)/$55.040
         'i-06a9b5df345d47eaa': 0.790,  # p4d.24xlarge  ($21.958-$4.608)/$21.958

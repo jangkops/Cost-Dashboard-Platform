@@ -16,7 +16,7 @@ def read_logs():
 def write_log(log_entry):
     logs = read_logs()
     logs.insert(0, log_entry)
-    logs = logs[:100]  # 최근 100개만 유지
+    logs = logs[:200]  # 최근 100개만 유지
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     with open(LOG_FILE, 'w') as f:
         json.dump(logs, f, indent=2)
